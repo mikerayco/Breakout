@@ -1,0 +1,4 @@
+# Ephemeral todo runtime state
+*.lock
+*.assignment.json
+.*.tmp
