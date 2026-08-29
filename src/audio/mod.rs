@@ -5,6 +5,7 @@
 //! pitch ramp and the persisted mute state. A no-op backend keeps the game
 //! silent-but-working when audio is unavailable (FR-49). Phase 7.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("audio: implemented in Phase 7")
 }

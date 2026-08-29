@@ -4,6 +4,7 @@
 //! No magic numbers anywhere else in the simulation. Values are proposed to
 //! Mike for review before Phase 2 builds (PRD §8; blocks Phase 2).
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/tuning: proposed to Mike, then implemented in Phase 2")
 }

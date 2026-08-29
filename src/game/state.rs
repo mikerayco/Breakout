@@ -3,6 +3,7 @@
 //! Owns the state machine and its legal transitions. A pure enum + move
 //! logic; no I/O (ADR-0005). Phase 2.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/state: implemented in Phase 2")
 }

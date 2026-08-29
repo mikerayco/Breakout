@@ -4,6 +4,7 @@
 //! walls, paddle, bricks. Reads `RunModifiers`/`ActiveEffects`, never
 //! branches on individual perks. Pure, deterministic, unit-tested (Phase 2).
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/physics: implemented in Phase 2")
 }

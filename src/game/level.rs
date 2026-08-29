@@ -4,6 +4,7 @@
 //! errors (FR-36) and the in-memory brick grid. Never panics on any input
 //! (property-tested). Phase 5.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/level: implemented in Phase 5")
 }

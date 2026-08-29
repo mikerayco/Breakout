@@ -5,6 +5,7 @@
 //! temp-file+fsync+rename atomic write, rename-aside corruption recovery,
 //! and `--reset-profile`. Written at run end, never per frame. Phase 8.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("save: implemented in Phase 8")
 }

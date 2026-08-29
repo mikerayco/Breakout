@@ -4,6 +4,7 @@
 //! refresh-not-stack, and the multiball ball list under its hard cap of 8.
 //! Mutates `ActiveEffects`, never branches in `physics.rs`. Phase 6.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/powerup: implemented in Phase 6")
 }

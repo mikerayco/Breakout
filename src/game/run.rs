@@ -4,6 +4,7 @@
 //! lv 1-2 … tier 4 = lv 7-8), the run summary, and the shard award. Pure and
 //! deterministic; the Phase 8 replay test runs it headlessly. Phase 8.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/run: implemented in Phase 8")
 }

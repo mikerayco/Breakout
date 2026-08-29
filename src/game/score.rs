@@ -4,6 +4,7 @@
 //! resets on paddle contact), and the brick-destroy scoring call. Pure;
 //! no I/O.
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/score: implemented in Phase 2")
 }

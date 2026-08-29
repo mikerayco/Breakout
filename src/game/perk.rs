@@ -5,6 +5,7 @@
 //! new perk enters the simulation. Table proposed to Mike for review first
 //! (PRD §8; blocks Phase 8).
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("game/perk: implemented in Phase 8")
 }

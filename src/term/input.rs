@@ -4,6 +4,7 @@
 //! the repeat-decay fallback when the protocol is unavailable. Game logic
 //! reads `InputState` only (Phase 3).
 
+#[allow(dead_code)]
 pub fn stub() -> ! {
     todo!("term/input: implemented in Phase 3")
 }
