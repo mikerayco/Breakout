@@ -1,0 +1,6 @@
+# Pinned exact stable channel (decided 2026-08-29, PRD §8): not "stable",
+# so a rolling toolchain upgrade cannot silently change build behaviour.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

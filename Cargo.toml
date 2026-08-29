@@ -1,0 +1,39 @@
+[package]
+name = "breakout-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "GPU-accelerated Breakout for graphics-capable terminals"
+keywords = ["game", "terminal", "breakout", "ghostty", "arcade"]
+categories = ["games", "command-line-utilities"]
+license = "MIT"
+
+[[bin]]
+name = "breakout"
+path = "src/main.rs"
+
+# The entire runtime dependency budget (ADR-0005). Adding anything here
+# requires a new accepted ADR. Do not deviate.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+tiny-skia = "0.12"
+kira = "0.12"
+libc = "0.2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+fastrand = "2"
+anyhow = "1"
+
+[dev-dependencies]
+proptest = "1"
+
+# ADR-0005: panic = "unwind" is required so the panic hook and Drop run
+# (TerminalGuard teardown, ADR-0010). "abort" is forbidden.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
