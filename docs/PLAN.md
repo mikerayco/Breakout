@@ -453,12 +453,18 @@ appears after crossing its threshold; the corrupt profile is renamed aside and p
    asciinema or GIF capture, and a **Credits** section listing every third-party asset (sound
    effects, music, any graphics), its source URL, and its licence (PRD NFR-12).
 3. `docs/PERF.md` final numbers on both machines.
-4. CI: `cargo build --release`, `cargo test`, `cargo clippy -D warnings`, `cargo fmt --check` on
-   macOS and Linux runners, MSRV job.
-5. Package metadata for `cargo install`: description, keywords, categories, licence (**OQ-3**),
+4. Package metadata for `cargo install`: description, keywords, categories, licence (**OQ-3**),
    `include` list, and `[[bin]] name = "breakout"` on package `breakout-tui`
    ([[project-plan/Breakout/ADR/ADR-0009-distribution|ADR-0009]]).
-6. Resolve **OQ-2**: document `cargo install --git` (resolved 2026-08-29 — no crates.io publish).
+5. Resolve **OQ-2**: document `cargo install --git` (resolved 2026-08-29 — no crates.io publish).
+
+**No CI in v1** ([[project-plan/Breakout/ADR/ADR-0011-no-ci|ADR-0011]] supersedes the CI provision
+of ADR-0009). Both-machines verification is manual: Mike plays a full run on macOS **and** on
+Linux at this gate (PRD §7). The local quality gates (`cargo build --release`, `cargo test`,
+`cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`) still must be clean; they are
+run by the agent, not by a CI runner. The Phase 9 balance pass (task 1) is an authorized
+exception to AGENTS §0 rule 2: tuning values may be changed freely, reviewed via the stop rule
+(Mike plays three runs) and the before/after table in `docs/BALANCE.md`.
 
 **Test gate**
 

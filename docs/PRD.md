@@ -275,6 +275,16 @@ Stated explicitly so the agent does not build these:
 - **Content proposals:** the agent proposes (for Mike's review before the relevant phase) the
   full 12+ perk table, the shard unlock table, the 16+ campaign levels, and the pixel-level
   perk-offer / run-summary screen layouts.
+- **Linux verification scope:** phases 0–8 are verified on macOS/Ghostty only. The
+  both-machines requirement (PRD §7) applies at Phase 9, where Mike plays a full run on macOS
+  **and** on Linux.
+- **Phase 9 balance pass:** authorized exception to AGENTS §0 rule 2. Tuning values may be
+  changed freely in Phase 9; review is via the Phase 9 stop rule (Mike plays three runs) and the
+  before/after table in `docs/BALANCE.md`, not per-value pre-approval.
+- **No CI in v1:** supersede ADR-0009's CI provision via ADR-0011. No CI workflow is written or
+  committed; `cargo install` is the only path. The local quality gates (build, test, clippy,
+  fmt) are run by the agent at the phase gates, not by a CI runner. MSRV remains pinned in
+  `Cargo.toml` (`rust-version = 1.98`) and `rust-toolchain.toml`.
 - **Run-seed display:** where the seed is printed (HUD/summary) is unspecified; folded into the
   Phase 8 UI layout proposal.
 

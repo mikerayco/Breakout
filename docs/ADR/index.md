@@ -22,6 +22,7 @@ yet**. Superseding an ADR means writing a new one, not editing the old.
 | [[project-plan/Breakout/ADR/ADR-0008-run-progression\|ADR-0008]] | Roguelite runs, data-driven perks, atomic JSON save | Accepted, built in Phase 8 |
 | [[project-plan/Breakout/ADR/ADR-0009-distribution\|ADR-0009]] | Package `breakout-tui`, binary `breakout`, `cargo install` only | Accepted, built in Phase 9 |
 | [[project-plan/Breakout/ADR/ADR-0010-terminal-state-safety\|ADR-0010]] | One RAII guard owns all terminal state; panic hook and signal handling | Accepted, built in Phase 0 |
+| [[project-plan/Breakout/ADR/ADR-0011-no-ci\|ADR-0011]] | No CI in v1; both-machines verification is manual at Phase 9 | Accepted, supersedes ADR-0009's CI provision |
 
 **Format for a new ADR:** Context → Decision → Consequences (good *and* bad, both stated) →
 Alternatives rejected. Filename `ADR-00NN-<slug>.md`.
