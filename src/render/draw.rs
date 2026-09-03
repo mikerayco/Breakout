@@ -12,7 +12,7 @@ use super::text::draw_text;
 /// Read-only over the world (rendering never mutates simulation).
 /// No particles, glow, or shake — correctness first (PLAN Phase 2 §6).
 #[allow(clippy::too_many_lines)]
-pub fn draw_world(fb: &mut Framebuffer, world: &crate::game::physics::World) {
+pub fn draw_world(fb: &mut Framebuffer, world: &crate::game::physics::World, muted: bool) {
     use crate::game::{physics::BrickKind, tuning};
     let s = fb.scale() as f32;
     let si = fb.scale();
@@ -86,14 +86,26 @@ pub fn draw_world(fb: &mut Framebuffer, world: &crate::game::physics::World) {
         fb.pixmap_mut()
             .fill_path(&circle, &paint, FillRule::Winding, identity(), None);
     }
-    // HUD text (MOCKUP §3 slots, 5x7 font).
-    let hud = format!(
-        "SCORE {:07}  LIVES {}  LVL {}/8  X{}",
-        world.score.points.min(9_999_999),
-        world.lives,
-        world.level_index + 1,
-        world.score.multiplier(),
-    );
+    // HUD text (MOCKUP §3 slots, 5x7 font). Mute indicator is visible at
+    // a glance when muted, hidden otherwise (FR-48). Muted state persists
+    // to the profile in Phase 8; until then it is session state.
+    let hud = if muted {
+        format!(
+            "SCORE {:07}  LIVES {}  LVL {}/8  X{}  MUTED",
+            world.score.points.min(9_999_999),
+            world.lives,
+            world.level_index + 1,
+            world.score.multiplier(),
+        )
+    } else {
+        format!(
+            "SCORE {:07}  LIVES {}  LVL {}/8  X{}",
+            world.score.points.min(9_999_999),
+            world.lives,
+            world.level_index + 1,
+            world.score.multiplier(),
+        )
+    };
     draw_text(
         fb.pixmap_mut(),
         6 * si as i32,
@@ -258,11 +270,55 @@ impl TestCard {
     }
 }
 
-/// Small FPS line under the HUD (Phase 2+ overlay).
-/// Separate from the Phase 1 test-card overlay so the game HUD stays clean.
+/// Small FPS / debug line under the HUD (Phase 2+ overlay).
 pub fn draw_fps_line(fb: &mut Framebuffer, line: &str) {
     let s = fb.scale();
     draw_text(fb.pixmap_mut(), 6 * s as i32, 22 * s as i32, line, *TEXT, s);
+}
+
+/// Pause menu (FR-6): Resume / Restart run / Mute / Quit. `selected` is
+/// the highlighted row. Up/Down (or j/k) moves, Enter/Space confirms,
+/// Esc resumes.
+pub fn draw_pause_menu(fb: &mut Framebuffer, selected: usize, muted: bool) {
+    let s = fb.scale();
+    let items = [
+        "RESUME".to_string(),
+        "RESTART RUN".to_string(),
+        format!("MUTE: {}", if muted { "ON" } else { "OFF" }),
+        "QUIT".to_string(),
+    ];
+    let title = "PAUSED";
+    let tw = super::text::text_width(title, s) as f32;
+    let fb_w = fb.width() as f32;
+    draw_text(
+        fb.pixmap_mut(),
+        ((fb_w - tw) / 2.0) as i32,
+        (80 * s) as i32,
+        title,
+        *TEXT,
+        s,
+    );
+    for (i, item) in items.iter().enumerate() {
+        let marker = if i == selected % items.len() {
+            "> "
+        } else {
+            "  "
+        };
+        let line = format!("{marker}{item}");
+        let iw = super::text::text_width(&line, s) as f32;
+        draw_text(
+            fb.pixmap_mut(),
+            ((fb_w - iw) / 2.0) as i32,
+            (100 * s + i as u32 * 12 * s) as i32,
+            &line,
+            if i == selected % items.len() {
+                *palette::PADDLE
+            } else {
+                *TEXT
+            },
+            s,
+        );
+    }
 }
 
 /// Solid-color paint helper.

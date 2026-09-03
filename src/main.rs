@@ -72,17 +72,18 @@ fn install_panic_hook() {
     }));
 }
 
-/// Phase 2 game loop: fixed-timestep simulation (ADR-0006) decoupled from
-/// the presentation clock (FR-9), flat-rect rendering, resize handling
-/// (FR-10/11) and the double-buffered frame transport (ADR-0002).
+/// Phase 3 game loop: protocol held-key input with legacy fallback
+/// (ADR-0004), fixed-timestep simulation (ADR-0006), pause menu (FR-6),
+/// mute + debug toggles, resize handling (FR-10/11), double-buffered
+/// transport (ADR-0002).
 fn run_loop(cli: Cli) -> anyhow::Result<()> {
-    use crossterm::event::{Event, KeyCode, KeyEventKind};
+    use crossterm::event::Event;
     use game::{
-        physics::{InputState, RunModifiers, World},
-        state::GameState,
+        physics::{InputState, RunModifiers},
         tuning,
     };
     use render::Frames;
+    use term::input::{Action, Poller};
 
     let transport = term::kgp::Transport::detect();
     let mut frames = Frames::new(cli.fps, transport);
@@ -98,12 +99,14 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
 
     let mut fb = current_framebuffer(cli.scale);
 
-    // Held-key decay for pre-protocol input (Phase 3 owns the real thing):
-    // a press holds its direction for 140ms so autorepeat still moves.
-    let mut left_until = Instant::now();
-    let mut right_until = Instant::now();
+    // Resolve the input mode once (probe reads stdin; never mid-frame).
+    let mut poller = Poller::new(term::input::legacy_mode());
     let mut launch_edge = false;
-    let hold = Duration::from_millis(140);
+    let mut muted = cli.no_audio;
+    let mut debug = false;
+    let mut pause_selected: usize = 0;
+    // NFR-2 readout: last measured key-to-movement latency.
+    let mut latency_ms: Option<f32> = None;
 
     let mut accumulator = 0.0f32;
     let mut last_frame = Instant::now();
@@ -120,73 +123,114 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
         let deadline = frames.wait_until_next();
         let poll_start = Instant::now();
         while crossterm::event::poll(Duration::from_secs(0))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if key.kind == KeyEventKind::Release {
-                    continue; // full release handling arrives in Phase 3
-                }
-                match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Esc => match world.state {
-                        GameState::Playing => {
-                            world.state = GameState::Paused;
-                        }
-                        GameState::Paused => {
-                            world.state = GameState::Playing;
-                        }
-                        _ => return Ok(()),
-                    },
-                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
-                        left_until = Instant::now() + hold;
-                    }
-                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
-                        right_until = Instant::now() + hold;
-                    }
-                    KeyCode::Char(' ') => launch_edge = true,
-                    KeyCode::Enter => {
-                        if world.state != GameState::Playing {
-                            advance_state(&mut world);
-                        } else {
-                            launch_edge = true;
-                        }
-                    }
-                    _ => {}
-                }
+            match crossterm::event::read()? {
+                Event::Key(key) => poller.observe(&key, Instant::now()),
+                // Focus loss / unexpected gap: never leave the paddle stuck.
+                Event::FocusLost => poller.clear_held(),
+                _ => {}
             }
             if poll_start.elapsed() > Duration::from_millis(4) {
                 break;
             }
         }
-        // Space also advances menus.
-        if launch_edge && world.state != GameState::Playing {
-            advance_state(&mut world);
-            launch_edge = false;
+
+        // Edge actions from this frame.
+        for action in poller.take_edges() {
+            match action {
+                Action::Quit => return Ok(()),
+                Action::Pause => match world.state {
+                    GameState::Playing => {
+                        world.state = GameState::Paused;
+                        pause_selected = 0;
+                    }
+                    GameState::Paused => {
+                        world.state = GameState::Playing;
+                    }
+                    _ => return Ok(()),
+                },
+                Action::Launch => {
+                    if world.state == GameState::Playing {
+                        launch_edge = true;
+                    } else if world.state == GameState::Paused {
+                        if activate_pause_item(
+                            &mut world,
+                            &mut pause_selected,
+                            &mut muted,
+                            cli.seed,
+                        ) {
+                            return Ok(());
+                        }
+                    } else {
+                        advance_state(&mut world);
+                    }
+                }
+                Action::MenuConfirm => {
+                    if world.state == GameState::Paused {
+                        if activate_pause_item(
+                            &mut world,
+                            &mut pause_selected,
+                            &mut muted,
+                            cli.seed,
+                        ) {
+                            return Ok(());
+                        }
+                    } else if world.state != GameState::Playing {
+                        advance_state(&mut world);
+                    } else {
+                        launch_edge = true;
+                    }
+                }
+                Action::MenuUp => {
+                    if world.state == GameState::Paused {
+                        pause_selected = pause_selected.saturating_sub(1);
+                    }
+                }
+                Action::MenuDown => {
+                    if world.state == GameState::Paused {
+                        pause_selected = (pause_selected + 1).min(3);
+                    }
+                }
+                Action::Mute => {
+                    muted = !muted;
+                }
+                Action::Debug => {
+                    debug = !debug;
+                }
+            }
         }
+        // Quit returns above; Esc on a non-playing, non-paused menu quits
+        // via the Pause arm. Space/Enter advances menus via Launch/Confirm.
 
         let now = Instant::now();
         if now < frames.next_due() {
-            // Not due yet: short sleep to avoid a hot spin, then re-poll.
             std::thread::sleep(deadline.min(Duration::from_millis(2)));
             continue;
         }
         frames.record_presented(now);
 
-        // Fixed-timestep accumulator (ADR-0006): consume frame time in DT
-        // steps, cap catch-up, drop the spiral remainder.
+        // Fixed-timestep accumulator (ADR-0006).
         let elapsed = (now - last_frame).as_secs_f32().min(0.25);
         last_frame = now;
         if world.state == GameState::Playing {
+            let held = poller.held(now);
+            // NFR-2 probe: if a movement key was pressed and the paddle is
+            // now moving, the key-to-movement delay is (now - press).
+            if let Some(t) = poller.last_press {
+                if (held.left || held.right) && world.paddle_vel != 0.0 {
+                    latency_ms = Some((now - t).as_secs_f32() * 1000.0);
+                }
+            }
             accumulator += elapsed;
             let mut steps = 0u8;
             while accumulator >= tuning::DT && steps < tuning::MAX_CATCHUP {
                 let input = InputState {
-                    left: now < left_until,
-                    right: now < right_until,
+                    left: held.left,
+                    right: held.right,
                     launch: launch_edge,
                 };
                 world.step(input, tuning::DT);
                 accumulator -= tuning::DT;
                 steps += 1;
-                // Edge consumed by the first step.
                 launch_edge = false;
                 if world.state != GameState::Playing {
                     accumulator = 0.0;
@@ -201,8 +245,7 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
             launch_edge = false;
         }
 
-        // Resize: recompute scale, reallocate if changed (FR-10), recover
-        // live from too-small (FR-11).
+        // Resize (FR-10), live recovery from too-small (FR-11).
         match current_framebuffer(cli.scale) {
             Some(wanted) if wanted.scale() != fb.as_ref().map(Framebuffer::scale).unwrap_or(0) => {
                 resize_rebuild(&mut fb, wanted, &mut frames);
@@ -216,25 +259,77 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
         }
 
         if let Some(cur) = &mut fb {
-            render::draw::draw_world(cur, &world);
+            render::draw::draw_world(cur, &world, muted);
+            if world.state == GameState::Paused {
+                render::draw::draw_pause_menu(cur, pause_selected, muted);
+            }
             let (p50, p99) = frames.percentiles();
-            render::draw::draw_fps_line(
-                cur,
-                &format!(
-                    "FPS {:>3.0} P50 {:>4.1} P99 {:>4.1} {} S={}",
-                    frames.avg_fps(),
-                    p50,
-                    p99,
-                    frames.transport.name(),
-                    cur.scale(),
-                ),
+            let mut line = format!(
+                "FPS {:>3.0} P50 {:>4.1} P99 {:>4.1} {} S={}",
+                frames.avg_fps(),
+                p50,
+                p99,
+                frames.transport.name(),
+                cur.scale(),
             );
+            if debug {
+                let held = poller.held(now);
+                line = format!(
+                    "{line} IN={} HELD={}{} LAT={} VEL={:.0} BALLS={} MUTE={}",
+                    if poller.is_legacy() {
+                        "legacy"
+                    } else {
+                        "kitty"
+                    },
+                    if held.left { "L" } else { "-" },
+                    if held.right { "R" } else { "-" },
+                    latency_ms.map_or("--".to_string(), |v| format!("{v:.1}MS")),
+                    world.paddle_vel,
+                    world.balls.len(),
+                    if muted { "ON" } else { "OFF" },
+                );
+            }
+            render::draw::draw_fps_line(cur, &line);
             let (id, prev) = frames.next_image_id();
             let w = cur.width();
             let h = cur.height();
             let rgb = cur.rgb_bytes();
             term::kgp::send_frame(frames.transport, rgb, w, h, id, prev)?;
         }
+    }
+}
+
+/// One pause-menu activation (FR-6): Resume / Restart run / Mute / Quit.
+/// Returns true when the player chose Quit (exit to shell).
+fn activate_pause_item(
+    world: &mut World,
+    selected: &mut usize,
+    muted: &mut bool,
+    seed_opt: Option<u64>,
+) -> bool {
+    use game::state::StateEvent;
+    match *selected % 4 {
+        0 => {
+            world.state = world
+                .state
+                .transition(StateEvent::Resume)
+                .unwrap_or(GameState::Playing);
+            false
+        }
+        1 => {
+            *world = World::new(
+                game::level::default_bricks(),
+                seed_opt.unwrap_or(0xBEEF),
+                0,
+                world.modifiers,
+            );
+            false
+        }
+        2 => {
+            *muted = !*muted;
+            false
+        }
+        _ => true,
     }
 }
 

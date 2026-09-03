@@ -8,9 +8,6 @@
 
 pub mod caps;
 pub mod guard;
-
-// Skeleton modules arriving in later phases.
-#[allow(dead_code)]
 pub mod input;
 #[allow(dead_code)]
 pub mod kgp;
