@@ -9,10 +9,8 @@
 mod cli;
 mod term;
 
-#[allow(dead_code)]
 mod audio;
 mod game;
-#[allow(dead_code)]
 mod save;
 
 mod render;
@@ -47,10 +45,30 @@ fn main() -> anyhow::Result<()> {
         return validate_levels(dir);
     }
 
-    // --reset-profile arrives in Phase 8; refuse cleanly until then.
+    // --reset-profile wipes progression after an explicit y/N
+    // confirmation (FR-45), asked before the terminal is taken over.
     if cli.reset_profile {
-        eprintln!("--reset-profile arrives with the save profile in Phase 8.");
-        std::process::exit(2);
+        use std::io::Write as _;
+        print!(
+            "Reset profile at {}? All shards and unlocks will be lost. [y/N] ",
+            save::path().display()
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let confirmed = std::io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim(), "y" | "Y" | "yes" | "YES");
+        if confirmed {
+            match save::reset() {
+                Ok(()) => println!("profile wiped."),
+                Err(e) => {
+                    eprintln!("breakout: reset failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            println!("cancelled; profile untouched.");
+        }
+        std::process::exit(0);
     }
 
     // FR-38: --level loads one file from disk and plays it standalone.
@@ -186,11 +204,20 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
     let mut fb = current_framebuffer(cli.scale);
 
     // Resolve the input mode once (probe reads stdin; never mid-frame).
+    // Persistent profile: shards, best, mute (FR-43/44/48). Loaded
+    // before takeover; a corrupt file is renamed aside, never fatal.
+    let mut profile = save::load();
+    let run_mode = cli.level.is_none();
     let mut poller = Poller::new(term::input::legacy_mode());
     let mut launch_edge = false;
-    let mut muted = cli.no_audio;
+    let mut muted = profile.muted || cli.no_audio;
     let mut debug = false;
     let mut bloom_on = !cli.no_bloom;
+    // Audio builds on a worker thread; the game never waits (FR-49).
+    // Mute persists to the profile in Phase 8; until then session state.
+    let mut audio = audio::Audio::spawn(cli.no_audio);
+    audio.set_muted(muted);
+    let mut muted_sent = muted;
     let mut pause_selected: usize = 0;
     // NFR-2 readout: last measured key-to-movement latency.
     let mut latency_ms: Option<f32> = None;
@@ -211,6 +238,16 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
     let mut hit_stop = 0.0f32;
     let mut paddle_flash_t = 0.0f32;
     let mut combo_pop_t = 0.0f32;
+    // Phase 8 run state: the active run, a pending perk offer + cursor,
+    // and a finished summary awaiting acknowledgement.
+    let mut run: Option<RunProgress> = None;
+    let mut offer: Option<Vec<game::perk::Perk>> = None;
+    let mut offer_sel: usize = 0;
+    let mut summary: Option<game::run::RunSummary> = None;
+    // F5 debug spawner: index into PowerKind::ALL (Phase 6 gate).
+    let mut spawn_idx: usize = 0;
+    // Cosmetic clock for the capsule bob (render time, not sim time).
+    let mut juice_t = 0.0f32;
 
     let mut accumulator = 0.0f32;
     let mut last_frame = Instant::now();
@@ -238,40 +275,78 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
             }
         }
 
-        // Edge actions from this frame.
+        // Edge actions from this frame. The offer screen owns
+        // navigation while it is up; the summary owns confirm.
         for action in poller.take_edges() {
+            let in_offer = offer.is_some();
+            let in_summary = summary.is_some();
             match action {
                 Action::Quit => return Ok(()),
-                Action::Pause => match world.state {
-                    GameState::Playing => {
-                        world.state = GameState::Paused;
-                        pause_selected = 0;
-                    }
-                    GameState::Paused => {
-                        world.state = GameState::Playing;
-                    }
-                    _ => return Ok(()),
-                },
-                Action::Launch => {
-                    if world.state == GameState::Playing {
-                        launch_edge = true;
-                    } else if world.state == GameState::Paused {
-                        if activate_pause_item(
+                Action::Pause => {
+                    if in_offer {
+                        // Abandon the run: no save, no shards.
+                        back_to_title(
                             &mut world,
-                            &mut pause_selected,
-                            &mut muted,
-                            cli.seed,
+                            &mut run,
+                            &mut offer,
+                            &mut summary,
+                            seed,
                             &mut run_id,
-                        ) {
-                            return Ok(());
-                        }
+                        );
+                    } else if in_summary {
+                        back_to_title(
+                            &mut world,
+                            &mut run,
+                            &mut offer,
+                            &mut summary,
+                            seed,
+                            &mut run_id,
+                        );
                     } else {
-                        advance_state(&mut world, &mut run_id);
+                        match world.state {
+                            GameState::Playing => {
+                                world.state = GameState::Paused;
+                                pause_selected = 0;
+                            }
+                            GameState::Paused => {
+                                world.state = GameState::Playing;
+                            }
+                            _ => return Ok(()),
+                        }
                     }
                 }
-                Action::MenuConfirm => {
-                    if world.state == GameState::Paused {
-                        if activate_pause_item(
+                Action::Launch | Action::MenuConfirm => {
+                    if in_summary {
+                        back_to_title(
+                            &mut world,
+                            &mut run,
+                            &mut offer,
+                            &mut summary,
+                            seed,
+                            &mut run_id,
+                        );
+                    } else if in_offer {
+                        if let Some(r) = run.as_mut() {
+                            confirm_offer(
+                                r,
+                                &mut offer,
+                                offer_sel,
+                                &mut world,
+                                &mut run_id,
+                                &mut audio,
+                            );
+                        }
+                    } else if world.state == GameState::Playing {
+                        launch_edge = true;
+                    } else if world.state == GameState::Paused {
+                        // Run mode restarts the current run level, not the
+                        // hard-coded standalone level.
+                        if run.is_some() && pause_selected == 1 {
+                            if let Some(r) = run.as_ref() {
+                                world = r.spawn_world();
+                                run_id += 1;
+                            }
+                        } else if activate_pause_item(
                             &mut world,
                             &mut pause_selected,
                             &mut muted,
@@ -280,27 +355,66 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
                         ) {
                             return Ok(());
                         }
-                    } else if world.state != GameState::Playing {
-                        advance_state(&mut world, &mut run_id);
+                    } else if world.state == GameState::Title {
+                        if run_mode {
+                            let r = RunProgress::start(cli.seed.unwrap_or_else(random_seed));
+                            world = r.spawn_world();
+                            run_id += 1;
+                            run = Some(r);
+                        } else {
+                            advance_state(&mut world, &mut run_id);
+                        }
                     } else {
-                        launch_edge = true;
+                        advance_state(&mut world, &mut run_id);
                     }
                 }
                 Action::MenuUp => {
-                    if world.state == GameState::Paused {
+                    if in_offer {
+                        offer_sel = offer_sel.saturating_sub(1);
+                    } else if world.state == GameState::Paused {
                         pause_selected = pause_selected.saturating_sub(1);
                     }
                 }
                 Action::MenuDown => {
-                    if world.state == GameState::Paused {
+                    if in_offer {
+                        offer_sel = (offer_sel + 1).min(2);
+                    } else if world.state == GameState::Paused {
                         pause_selected = (pause_selected + 1).min(3);
+                    }
+                }
+                Action::Pick(i) => {
+                    if in_offer {
+                        offer_sel = i.min(2);
+                        if let Some(r) = run.as_mut() {
+                            confirm_offer(
+                                r,
+                                &mut offer,
+                                offer_sel,
+                                &mut world,
+                                &mut run_id,
+                                &mut audio,
+                            );
+                        }
                     }
                 }
                 Action::Mute => {
                     muted = !muted;
+                    audio.set_muted(muted);
                 }
                 Action::Bloom => {
                     bloom_on = !bloom_on;
+                }
+                Action::Spawn => {
+                    use game::powerup::{Capsule, PowerKind};
+                    let kind = PowerKind::ALL[spawn_idx % PowerKind::ALL.len()];
+                    spawn_idx += 1;
+                    if world.capsules.len() < game::tuning::CAPSULE_MAX {
+                        world.capsules.push(Capsule {
+                            x: world.paddle_x,
+                            y: game::tuning::PADDLE_Y - 30.0,
+                            kind,
+                        });
+                    }
                 }
                 Action::Debug => {
                     debug = !debug;
@@ -309,6 +423,14 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
         }
         // Quit returns above; Esc on a non-playing, non-paused menu quits
         // via the Pause arm. Space/Enter advances menus via Launch/Confirm.
+        // Mute may change via key or pause menu: sync on change only,
+        // and persist to the profile (FR-48).
+        if muted != muted_sent {
+            audio.set_muted(muted);
+            muted_sent = muted;
+            profile.muted = muted;
+            let _ = save::save(&profile);
+        }
 
         let now = Instant::now();
         if now < frames.next_due() {
@@ -361,6 +483,41 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
             launch_edge = false;
         }
 
+        if run_mode && summary.is_none() {
+            if let Some(r) = run.as_mut() {
+                if offer.is_none() && world.state == GameState::LevelClear {
+                    r.record_level(&world);
+                    let last = r.pos + 1 >= 8 || r.pos + 1 >= r.spec.len().max(1);
+                    if last {
+                        finish_summary(
+                            r,
+                            (r.pos + 1) as u32,
+                            &mut summary,
+                            &mut profile,
+                            &mut offer,
+                        );
+                    } else {
+                        offer = Some(
+                            game::perk::offer(&mut r.offer_rng, profile.shards, &r.perks_taken)
+                                .into_iter()
+                                .copied()
+                                .collect(),
+                        );
+                        offer_sel = 0;
+                    }
+                } else if world.state == GameState::RunOver {
+                    r.record_level(&world);
+                    let cleared = r.pos as u32;
+                    finish_summary(r, cleared, &mut summary, &mut profile, &mut offer);
+                }
+            }
+        }
+        // Sim events from this frame's steps become sound (FR-46). The
+        // buffer is drained, not dropped, so it never reallocates.
+        audio.play_events(&world.events, world.score.combo);
+        world.events.clear();
+        // Duck the music bed while hit-stop holds (FR-47).
+        audio.set_ducked(hit_stop > 0.0);
         // Juice events: diff the sim bricks against last frame (no
         // allocation — the buffers are reused). A changed run id means a
         // fresh level, so snapshot quietly instead of bursting.
@@ -393,6 +550,7 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
             );
         }
         // Cosmetic timers always advance on render time (even in hit-stop).
+        juice_t += elapsed;
         paddle_flash_t = (paddle_flash_t - elapsed).max(0.0);
         combo_pop_t = (combo_pop_t - elapsed).max(0.0);
         for ring in &mut rings {
@@ -447,11 +605,29 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
             }
             let pscale = cur.scale() as f32;
             pool.draw(cur.pixmap_mut(), pscale, ox, oy);
+            let bob = (juice_t * 5.0).sin() * 1.0;
+            render::draw::draw_capsules(cur, &world.capsules, ox, oy, bob);
+            render::draw::draw_shots(cur, &world.shots, ox, oy);
+            render::draw::draw_powerup_hud(cur, &world.effects);
             if bloom_on {
                 render::bloom::apply(cur.pixmap_mut());
             }
             if world.state == GameState::Paused {
                 render::draw::draw_pause_menu(cur, pause_selected, muted);
+                let chips: &[game::perk::PerkId] = run
+                    .as_ref()
+                    .map(|r| r.perks_taken.as_slice())
+                    .unwrap_or(&[]);
+                render::draw::draw_perk_chips(cur, chips);
+            }
+            if let Some(choices) = &offer {
+                render::draw::draw_offer(cur, choices, offer_sel);
+            }
+            if let Some(s) = &summary {
+                render::draw::draw_summary(cur, s);
+            }
+            if world.state == GameState::Title && run.is_none() {
+                render::draw::draw_title_stats(cur, profile.shards, profile.runs);
             }
             let (p50, p99) = frames.percentiles();
             let mut line = format!(
@@ -465,7 +641,7 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
             if debug {
                 let held = poller.held(now);
                 line = format!(
-                    "{line} IN={} HELD={}{} LAT={} VEL={:.0} BALLS={} MUTE={} BLOOM={} P={} SHK={:.1}",
+                    "{line} IN={} HELD={}{} LAT={} VEL={:.0} BALLS={} MUTE={} BLOOM={} P={} SHK={:.1} AU={}",
                     if poller.is_legacy() {
                         "legacy"
                     } else {
@@ -480,6 +656,13 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
                     if bloom_on { "ON" } else { "OFF" },
                     pool.len(),
                     shake.magnitude(),
+                    if audio.silent() {
+                        "silent"
+                    } else if audio.ready() {
+                        "live"
+                    } else {
+                        "starting"
+                    },
                 );
             }
             render::draw::draw_fps_line(cur, &line);
@@ -608,6 +791,191 @@ fn activate_pause_item(
         }
         _ => true,
     }
+}
+
+/// One run in progress (Phase 8): spec, position, taken perks, carried
+/// lives/score and the offer RNG. Present only outside `--level`.
+struct RunProgress {
+    spec: Vec<game::run::RunLevel>,
+    levels: Vec<(String, game::level::Level)>,
+    pos: usize,
+    perks_taken: Vec<game::perk::PerkId>,
+    modifiers: game::physics::RunModifiers,
+    lives: i32,
+    seed: u64,
+    offer_rng: game::rng::Rng,
+    score: u64,
+    bricks: u32,
+    best: u32,
+}
+
+impl RunProgress {
+    /// Start a run: tier pools sampled by seed (FR-39).
+    fn start(seed: u64) -> Self {
+        let levels = load_campaign();
+        let spec = game::run::build_run(
+            &levels
+                .iter()
+                .map(|(id, lvl)| (id.clone(), lvl.clone()))
+                .collect::<Vec<_>>(),
+            seed,
+        );
+        Self {
+            spec,
+            levels,
+            pos: 0,
+            perks_taken: Vec::new(),
+            modifiers: game::physics::RunModifiers::default(),
+            lives: game::tuning::STARTING_LIVES,
+            seed,
+            offer_rng: game::rng::Rng::from_seed(seed ^ 0x51ED),
+            score: 0,
+            bricks: 0,
+            best: 0,
+        }
+    }
+
+    /// The campaign level for the current position, if the id survived.
+    fn current_level(&self) -> Option<&game::level::Level> {
+        let id = &self.spec.get(self.pos)?.id;
+        self.levels
+            .iter()
+            .find(|(lid, _)| lid == id)
+            .map(|(_, l)| l)
+    }
+
+    /// Spawn the current level's world: run position drives the speed
+    /// ramp, perks drive the modifiers, lives carry across levels.
+    fn spawn_world(&self) -> World {
+        let mut modifiers = self.modifiers;
+        let (bricks, level_index) = match self.current_level() {
+            Some(lvl) => {
+                modifiers.ball_speed_mul *= lvl.ball_speed;
+                modifiers.drop_rate_add += lvl.drop_rate - game::tuning::DROP_RATE_DEFAULT;
+                (lvl.bricks.clone(), self.pos as u32)
+            }
+            None => (game::level::default_bricks(), self.pos as u32),
+        };
+        let mut world = World::new(
+            bricks,
+            self.seed ^ (self.pos as u64 + 1),
+            level_index,
+            modifiers,
+        );
+        world.lives = self.lives;
+        world
+    }
+
+    /// Fold a finished level's stats into the run totals.
+    fn record_level(&mut self, world: &World) {
+        self.score += world.score.points;
+        self.bricks += world.score.bricks_destroyed;
+        self.best = self.best.max(world.score.best_combo);
+        self.lives = world.lives;
+    }
+}
+
+/// Baked campaign levels that parsed cleanly (validated at build gate).
+fn load_campaign() -> Vec<(String, game::level::Level)> {
+    game::level::campaign()
+        .into_iter()
+        .filter_map(|(id, res)| res.ok().map(|lvl| (id, lvl)))
+        .collect()
+}
+
+/// Random run seed from the wall clock (main-loop use only; the sim stays
+/// pure). `--seed` fixes it for reproducibility (FR-39).
+fn random_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xBEEF)
+}
+
+/// Title backdrop world (also the pre-run attract screen).
+fn title_world(seed: u64) -> World {
+    let mut world = World::new(
+        game::level::default_bricks(),
+        seed,
+        0,
+        game::physics::RunModifiers::default(),
+    );
+    world.state = GameState::Title;
+    world
+}
+
+/// Confirm the highlighted offer pick: apply the perk, advance the run,
+/// spawn the next level (FR-40).
+fn confirm_offer(
+    run: &mut RunProgress,
+    offer: &mut Option<Vec<game::perk::Perk>>,
+    sel: usize,
+    world: &mut World,
+    run_id: &mut u64,
+    audio: &mut audio::Audio,
+) {
+    let choices = offer.take().unwrap_or_default();
+    if choices.is_empty() || run.pos + 1 >= run.spec.len() {
+        return;
+    }
+    let pick = choices[sel % choices.len()];
+    game::perk::apply_by_id(&mut run.modifiers, pick.id);
+    run.perks_taken.push(pick.id);
+    audio.play_sfx(audio::Sfx::PerkPick, 0);
+    run.pos += 1;
+    *world = run.spawn_world();
+    *run_id += 1;
+}
+
+/// Drop back to the title backdrop, forgetting run/offer/summary state.
+fn back_to_title(
+    world: &mut World,
+    run: &mut Option<RunProgress>,
+    offer: &mut Option<Vec<game::perk::Perk>>,
+    summary: &mut Option<game::run::RunSummary>,
+    seed: u64,
+    run_id: &mut u64,
+) {
+    *world = title_world(seed);
+    *run = None;
+    *offer = None;
+    *summary = None;
+    *run_id += 1;
+}
+
+/// Finish the run into a summary, award shards and persist (FR-42/43/44).
+fn finish_summary(
+    run: &RunProgress,
+    levels_cleared: u32,
+    summary: &mut Option<game::run::RunSummary>,
+    profile: &mut save::Profile,
+    offer: &mut Option<Vec<game::perk::Perk>>,
+) {
+    let perks = run
+        .perks_taken
+        .iter()
+        .map(|id| {
+            game::perk::PERKS
+                .iter()
+                .find(|p| p.id == *id)
+                .map(|p| p.name.to_string())
+                .unwrap_or_else(|| id.0.to_string())
+        })
+        .collect();
+    let s = game::run::RunSummary::new(
+        run.score,
+        levels_cleared,
+        run.bricks,
+        run.best,
+        perks,
+        run.seed,
+    );
+    profile.shards += s.shards;
+    profile.runs += 1;
+    profile.best_score = profile.best_score.max(s.score);
+    let _ = save::save(profile);
+    *offer = None;
+    *summary = Some(s);
 }
 
 /// Space/Enter on a menu state: title -> play, clear -> next level (fresh

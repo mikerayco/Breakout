@@ -286,11 +286,12 @@ pub fn capability_report() -> String {
          graphics protocol:  {}\n\
          keyboard protocol:  {}\n\
          cell pixel size:    {cell_str}\n\
-         window pixel size:  {window_str}\n",
+         window pixel size:  {window_str}\n         audio:               {}\n",
         if graphics { "kitty (ok)" } else { "MISSING" },
         match keyboard {
             Some(flags) => format!("kitty (query ok, current state flags={flags})"),
             None => "not supported (degraded input mode)".to_string(),
         },
+        crate::audio::probe_summary(),
     )
 }

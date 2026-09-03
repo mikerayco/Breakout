@@ -121,6 +121,28 @@ pub fn hit_stop_secs(combo: u32) -> f32 {
     HIT_STOP_MAX + (HIT_STOP_MIN - HIT_STOP_MAX) * t
 }
 
+// --- Powerups (FR-31..34; durations proposed for Phase 6 review) ---
+/// Laser duration, seconds.
+pub const POWERUP_DUR_LASER: f32 = 10.0;
+/// Sticky duration, seconds.
+pub const POWERUP_DUR_STICKY: f32 = 12.0;
+/// Wide duration, seconds.
+pub const POWERUP_DUR_WIDE: f32 = 15.0;
+/// Slow duration, seconds.
+pub const POWERUP_DUR_SLOW: f32 = 10.0;
+/// Pierce duration, seconds.
+pub const POWERUP_DUR_PIERCE: f32 = 8.0;
+/// Laser projectile speed, logical px/s.
+pub const LASER_SPEED: f32 = 420.0;
+/// Max live laser projectiles.
+pub const LASER_MAX_SHOTS: usize = 4;
+/// Max falling capsules at once; further drops are skipped.
+pub const CAPSULE_MAX: usize = 8;
+/// Slow factor on ball speed (FR-32 specifies x0.7).
+pub const SLOW_FACTOR: f32 = 0.7;
+/// Multiball split half-angle, radians each side of the parent velocity.
+pub const MULTIBALL_SPLIT_RAD: f32 = 0.35;
+
 /// Current ball speed for this level progress: base + ramp, capped.
 pub fn ball_speed(bricks_destroyed_this_level: u32, level_index: u32) -> f32 {
     let s = BALL_BASE_SPEED

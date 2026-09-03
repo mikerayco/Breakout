@@ -45,6 +45,10 @@ pub enum Action {
     Debug,
     /// `F4`: bloom toggle (FR-29).
     Bloom,
+    /// `F5`: debug spawner — cycle and spawn a chosen powerup (Phase 6).
+    Spawn,
+    /// Number keys 1-3: perk offer direct pick (Phase 8).
+    Pick(usize),
     /// Pause menu navigation.
     MenuUp,
     /// Pause menu navigation.
@@ -161,6 +165,18 @@ impl Poller {
                     self.edges.push(Action::Bloom);
                 }
             }
+            KeyCode::F(5) => {
+                if matches!(key.kind, KeyEventKind::Press) {
+                    self.edges.push(Action::Spawn);
+                }
+            }
+            KeyCode::Char('1' | '2' | '3') => {
+                if matches!(key.kind, KeyEventKind::Press) {
+                    if let KeyCode::Char(c) = key.code {
+                        self.edges.push(Action::Pick(c as usize - '1' as usize));
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
                 if matches!(key.kind, KeyEventKind::Press) {
                     self.edges.push(Action::MenuUp);
@@ -255,12 +271,16 @@ mod tests {
         p.observe(&press(KeyCode::Char('m')), now);
         p.observe(&press(KeyCode::F(3)), now);
         p.observe(&press(KeyCode::F(4)), now);
+        p.observe(&press(KeyCode::F(5)), now);
+        p.observe(&press(KeyCode::Char('2')), now);
         let edges = p.take_edges();
         assert!(edges.contains(&Action::Launch));
         assert!(edges.contains(&Action::Pause));
         assert!(edges.contains(&Action::Mute));
         assert!(edges.contains(&Action::Debug));
         assert!(edges.contains(&Action::Bloom));
+        assert!(edges.contains(&Action::Spawn));
+        assert!(edges.contains(&Action::Pick(1)));
         assert!(p.take_edges().is_empty());
     }
 

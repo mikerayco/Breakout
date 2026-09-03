@@ -1,4 +1,4 @@
-//! Build script: generate the compiled-in campaign manifest (Phase 5).
+//! Build script: campaign manifest (Phase 5) + synthesized audio (Phase 7).
 //!
 //! Reads `assets/levels/campaign/NN-slug.lvl` and emits
 //! `OUT_DIR/campaign_manifest.rs` with one `include_str!` per level, so an
@@ -44,4 +44,160 @@ fn main() {
 
     println!("cargo:rerun-if-changed=assets/levels/campaign");
     println!("cargo:rerun-if-changed=build.rs");
+
+    synth_audio(Path::new(&out).join("audio"));
+}
+
+/// Synthesize the whole v1 sound set into `OUT_DIR/audio/*.wav` (Phase 7).
+///
+/// Self-generated bleeps, not third-party samples: no licence to credit,
+/// no decoder beyond kira's native WAV, deterministic across builds (fixed
+/// LCG noise seed). 22050 Hz mono 16-bit keeps the set small.
+/// (OQ-5 resolved CC0-sourcing; this deviation — original synth instead of
+/// sourced beds — is recorded in docs/PERF.md Phase 7 and the README.)
+fn synth_audio(dir: std::path::PathBuf) {
+    const SR: u32 = 22050;
+    fs::create_dir_all(&dir).expect("audio out dir");
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_f32(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
+        }
+    }
+
+    fn envelope(t: f32, len: f32) -> f32 {
+        (-4.0 * t / len).exp()
+    }
+    fn sine(ph: f32) -> f32 {
+        (ph * std::f32::consts::TAU).sin()
+    }
+    fn square(ph: f32) -> f32 {
+        if ph.fract() < 0.5 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+    // Frequency sweep from f0 to f1 over `len` seconds, integrated phase.
+    fn sweep_phase(t: f32, f0: f32, f1: f32, len: f32) -> f32 {
+        t * (f0 + (f1 - f0) * t / len / 2.0)
+    }
+
+    fn write_wav(path: &Path, samples: &[f32], sr: u32) {
+        let n = samples.len() as u32;
+        let mut buf = Vec::with_capacity(44 + n as usize * 2);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + n * 2).to_le_bytes());
+        buf.extend_from_slice(b"WAVEfmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&sr.to_le_bytes());
+        buf.extend_from_slice(&(sr * 2).to_le_bytes());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&16u16.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&(n * 2).to_le_bytes());
+        for s in samples {
+            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        fs::write(path, buf).expect("write wav");
+    }
+
+    fn render(len: f32, sr: u32, mut f: impl FnMut(f32) -> f32) -> Vec<f32> {
+        let n = (len * sr as f32) as usize;
+        (0..n).map(|i| f(i as f32 / sr as f32)).collect()
+    }
+
+    let mut rng = Lcg(0xBEEFCAFE);
+    let noise: Vec<f32> = (0..(SR as usize)).map(|_| rng.next_f32()).collect();
+    let at = |t: f32| noise[(t * SR as f32) as usize % noise.len()];
+
+    let sfx: &[(&str, Vec<f32>)] = &[
+        (
+            "brick_hit",
+            render(0.06, SR, |t| square(660.0 * t) * 0.35 * envelope(t, 0.06)),
+        ),
+        (
+            "brick_destroy",
+            render(0.12, SR, |t| {
+                (sine(sweep_phase(t, 440.0, 220.0, 0.12)) * 0.5 + at(t) * 0.25) * envelope(t, 0.12)
+            }),
+        ),
+        (
+            "paddle",
+            render(0.07, SR, |t| sine(330.0 * t) * 0.5 * envelope(t, 0.07)),
+        ),
+        (
+            "wall",
+            render(0.05, SR, |t| sine(220.0 * t) * 0.4 * envelope(t, 0.05)),
+        ),
+        (
+            "drop",
+            render(0.20, SR, |t| {
+                sine(sweep_phase(t, 880.0, 440.0, 0.20)) * 0.4 * envelope(t, 0.20)
+            }),
+        ),
+        (
+            "collect",
+            render(0.15, SR, |t| {
+                sine(sweep_phase(t, 440.0, 880.0, 0.15)) * 0.4 * envelope(t, 0.15)
+            }),
+        ),
+        (
+            "laser",
+            render(0.10, SR, |t| {
+                square(sweep_phase(t, 1200.0, 300.0, 0.10)) * 0.3 * envelope(t, 0.10)
+            }),
+        ),
+        (
+            "life_lost",
+            render(0.40, SR, |t| {
+                sine(sweep_phase(t, 400.0, 100.0, 0.40)) * 0.5 * envelope(t, 0.40)
+            }),
+        ),
+        (
+            "level_clear",
+            render(0.36, SR, |t| {
+                let notes = [523.25, 659.25, 783.99];
+                let idx = ((t / 0.12) as usize).min(2);
+                sine(notes[idx] * t) * 0.4 * envelope(t % 0.12, 0.12)
+            }),
+        ),
+        (
+            "perk_pick",
+            render(0.15, SR, |t| {
+                let f = if t < 0.07 { 600.0 } else { 900.0 };
+                sine(f * t) * 0.4 * envelope(t, 0.15)
+            }),
+        ),
+    ];
+    for (name, samples) in sfx {
+        write_wav(&dir.join(format!("{name}.wav")), samples, SR);
+    }
+
+    // Music bed: 8 s loop, Am-F-C-G pads + soft bass pulse, baked quiet.
+    let chords = [
+        [220.0, 261.63, 329.63],
+        [174.61, 220.0, 261.63],
+        [130.81, 164.81, 196.0],
+        [196.0, 246.94, 293.66],
+    ];
+    let music = render(8.0, SR, |t| {
+        let seg = ((t / 2.0) as usize).min(3);
+        let chord = chords[seg];
+        let pad = chord.iter().map(|f| sine(f * t)).sum::<f32>() / 3.0;
+        let bass = sine(chord[0] / 2.0 * t) * (0.5 + 0.5 * sine(2.0 * t));
+        // Loop-safe crossfades on both ends.
+        let fade_in = (t / 0.1).min(1.0);
+        let fade_out = if t > 7.9 { (8.0 - t) / 0.1 } else { 1.0 };
+        (pad * 0.10 + bass * 0.06) * fade_in * fade_out
+    });
+    write_wav(&dir.join("music.wav"), &music, SR);
 }

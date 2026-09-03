@@ -4,6 +4,7 @@
 //! walls, paddle, bricks. Reads `RunModifiers`, never branches on
 //! individual perks. Pure, deterministic, unit-tested.
 
+use super::powerup::{ActiveEffects, Capsule, PowerKind, Shot};
 use super::rng::Rng;
 use super::score::Score;
 use super::state::GameState;
@@ -23,6 +24,12 @@ pub struct RunModifiers {
     pub drop_rate_add: f32,
     /// Extra starting lives (Phase 8).
     pub starting_lives: i32,
+    /// Lives refunded per level before decrementing (Second Serve axis).
+    pub life_refund_per_level: u8,
+    /// Capsule attraction speed toward the paddle, px/s (Magnet axis).
+    pub magnet_strength: f32,
+    /// Multiplier on timed powerup durations (Long Fuse axis).
+    pub powerup_duration_mul: f32,
 }
 
 impl Default for RunModifiers {
@@ -33,6 +40,9 @@ impl Default for RunModifiers {
             score_mul: 1.0,
             drop_rate_add: 0.0,
             starting_lives: 0,
+            life_refund_per_level: 0,
+            magnet_strength: 0.0,
+            powerup_duration_mul: 1.0,
         }
     }
 }
@@ -47,6 +57,30 @@ pub struct InputState {
     pub right: bool,
     /// Edge: launch a stuck ball.
     pub launch: bool,
+}
+
+/// Frame event for audio (FR-46). Pushed by the sim, drained once per
+/// frame by the main loop. Pure derivation: replay-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimEvent {
+    /// Ball bounced off a wall.
+    WallBounce,
+    /// Ball bounced off (or stuck to) the paddle.
+    PaddleBounce,
+    /// Brick took a non-fatal hit.
+    BrickHit,
+    /// Brick destroyed; combo after increment (for pitch/volume).
+    BrickDestroyed { combo: u32 },
+    /// A ball was lost (lives decremented or run over).
+    LifeLost,
+    /// No destructible bricks remain.
+    LevelClear,
+    /// A capsule spawned.
+    DropSpawned,
+    /// A capsule was collected.
+    Collected(PowerKind),
+    /// A laser projectile was fired.
+    ShotFired,
 }
 
 /// One ball. Position is the centre in logical pixels.
@@ -157,6 +191,17 @@ pub struct World {
     pub rng: Rng,
     /// Data-driven modifiers.
     pub modifiers: RunModifiers,
+    /// Life refunds left this level (Second Serve axis).
+    pub refund_left: u8,
+    /// Timed powerup effects (FR-33). Physics reads these axes.
+    pub effects: ActiveEffects,
+    /// Falling capsules (FR-31).
+    pub capsules: Vec<Capsule>,
+    /// Laser projectiles.
+    pub shots: Vec<Shot>,
+    /// Frame event log (FR-46). Drained once per frame by the main loop;
+    /// derived purely from the sim, so replay stays deterministic.
+    pub events: Vec<SimEvent>,
 }
 
 impl World {
@@ -175,19 +220,39 @@ impl World {
             state: GameState::Playing,
             rng: Rng::from_seed(seed),
             modifiers,
+            effects: ActiveEffects {
+                duration_mul: modifiers.powerup_duration_mul,
+                ..Default::default()
+            },
+            refund_left: modifiers.life_refund_per_level,
+            capsules: Vec::new(),
+            shots: Vec::new(),
+            events: Vec::with_capacity(16),
         };
         w.spawn_stuck_ball();
         w
     }
 
-    /// Current paddle width after modifiers.
+    /// Current paddle width after modifiers and the Wide axis.
     pub fn paddle_width(&self) -> f32 {
-        (tuning::PADDLE_W * self.modifiers.paddle_width_mul).clamp(20.0, 120.0)
+        let wide = if self.effects.wide_active() {
+            tuning::PADDLE_W_WIDE / tuning::PADDLE_W
+        } else {
+            1.0
+        };
+        (tuning::PADDLE_W * self.modifiers.paddle_width_mul * wide).clamp(20.0, 120.0)
     }
 
-    /// Target ball speed right now.
+    /// Target ball speed right now (ramp x modifiers x the Slow axis).
     pub fn target_speed(&self) -> f32 {
-        tuning::ball_speed(self.bricks_destroyed, self.level_index) * self.modifiers.ball_speed_mul
+        let slow = if self.effects.slow_active() {
+            tuning::SLOW_FACTOR
+        } else {
+            1.0
+        };
+        tuning::ball_speed(self.bricks_destroyed, self.level_index)
+            * self.modifiers.ball_speed_mul
+            * slow
     }
 
     /// Place a stuck ball on the paddle (start of life / level).
@@ -214,8 +279,19 @@ impl World {
             return;
         }
         self.step_paddle(input, dt);
-        // Launch edge: release stuck balls.
+        // Effect clocks tick on sim time; a Slow change renormalises all
+        // balls so no powerup leaves permanent speed behind (FR-33).
+        let slow_was = self.effects.slow_active();
+        self.effects.tick(dt);
+        if self.effects.slow_active() != slow_was {
+            self.renormalise_balls();
+        }
+        // Launch edge: fire the laser first, then release stuck balls
+        // (Sticky catch-and-release shares the same key, FR-32).
         if input.launch {
+            if self.effects.laser_active() {
+                self.fire_laser();
+            }
             let speed = self.target_speed();
             for b in self.balls.iter_mut().filter(|b| b.stuck) {
                 b.stuck = false;
@@ -254,8 +330,18 @@ impl World {
             self.balls = kept;
         }
         if self.balls.is_empty() {
+            if self.refund_left > 0 {
+                // Second Serve axis: refunded, lives untouched, no event.
+                self.refund_left -= 1;
+                self.score.on_paddle_contact();
+                self.paddle_x = tuning::PLAY_X + tuning::PLAY_W / 2.0;
+                self.paddle_vel = 0.0;
+                self.spawn_stuck_ball();
+                return;
+            }
             self.lives -= 1;
             self.score.on_paddle_contact();
+            self.events.push(SimEvent::LifeLost);
             if self.lives <= 0 {
                 self.state = GameState::RunOver;
             } else {
@@ -265,8 +351,11 @@ impl World {
             }
             return;
         }
+        self.step_capsules(dt);
+        self.step_shots(dt);
         if self.remaining() == 0 {
             self.state = GameState::LevelClear;
+            self.events.push(SimEvent::LevelClear);
             // Keep the transition function honest: the legal move exists.
             debug_assert!(self
                 .state
@@ -407,8 +496,19 @@ impl World {
                     b.vy = -b.vy;
                 }
                 enforce_min_vertical(b);
+                self.events.push(SimEvent::WallBounce);
             }
             HitKind::Paddle => {
+                // Sticky axis: catch instead of bouncing (FR-32). Contact
+                // still resets the combo (FR-23); `Space` relaunches.
+                if self.effects.sticky_active() {
+                    self.balls[idx].stuck = true;
+                    self.balls[idx].vx = 0.0;
+                    self.balls[idx].vy = 0.0;
+                    self.score.on_paddle_contact();
+                    self.events.push(SimEvent::PaddleBounce);
+                    return;
+                }
                 // English: offset across the paddle sets the angle (FR-15),
                 // plus a carry of paddle momentum (FR-13).
                 let w = self.paddle_width();
@@ -429,10 +529,16 @@ impl World {
                 self.balls[idx].vy = vy;
                 enforce_min_vertical(&mut self.balls[idx]);
                 self.score.on_paddle_contact();
+                self.events.push(SimEvent::PaddleBounce);
             }
             HitKind::Brick(bi) => {
-                // Reflect first (steel reflects identically).
-                {
+                // Pierce axis: pass through bricks it destroys instead of
+                // reflecting (FR-32). Steel is indestructible, so it still
+                // reflects. The axis is read, never a per-kind branch.
+                let pierce = self.effects.pierce_active()
+                    && bi < self.bricks.len()
+                    && self.bricks[bi].kind != BrickKind::Steel;
+                if !pierce {
                     let b = &mut self.balls[idx];
                     if hit.nx != 0.0 {
                         b.vx = -b.vx;
@@ -443,15 +549,22 @@ impl World {
                     enforce_min_vertical(b);
                 }
                 self.damage_brick(bi);
-                // Speed ramp: renormalise all balls to the new target.
-                let speed = self.target_speed();
-                for ball in self.balls.iter_mut().filter(|b| !b.stuck) {
-                    let sp = (ball.vx * ball.vx + ball.vy * ball.vy).sqrt();
-                    if sp > 1e-6 {
-                        ball.vx = ball.vx / sp * speed;
-                        ball.vy = ball.vy / sp * speed;
-                    }
-                }
+                self.events.push(SimEvent::BrickHit);
+                self.renormalise_balls();
+            }
+        }
+    }
+
+    /// Renormalise every flying ball to the target speed, preserving
+    /// direction. Used by the speed ramp and the Slow axis edges, so no
+    /// powerup leaves permanent speed behind (FR-33).
+    fn renormalise_balls(&mut self) {
+        let speed = self.target_speed();
+        for ball in self.balls.iter_mut().filter(|b| !b.stuck) {
+            let sp = (ball.vx * ball.vx + ball.vy * ball.vy).sqrt();
+            if sp > 1e-6 {
+                ball.vx = ball.vx / sp * speed;
+                ball.vy = ball.vy / sp * speed;
             }
         }
     }
@@ -469,18 +582,15 @@ impl World {
                 if self.bricks[bi].hp > 1 {
                     self.bricks[bi].hp -= 1;
                 } else {
-                    let pos = (self.bricks[bi].col, self.bricks[bi].row);
+                    let (c, r) = (self.bricks[bi].col, self.bricks[bi].row);
                     self.bricks.swap_remove(bi);
-                    self.on_brick_destroyed();
-                    // Shrapnel axis (ADR-0008) is intentionally not branched
-                    // on here in Phase 2; perks arrive in Phase 8.
-                    let _ = pos;
+                    self.on_brick_destroyed(brick_center(c, r));
                 }
             }
             BrickKind::Explosive => {
                 let (ec, er) = (self.bricks[bi].col, self.bricks[bi].row);
                 self.bricks.swap_remove(bi);
-                self.on_brick_destroyed();
+                self.on_brick_destroyed(brick_center(ec, er));
                 self.detonate(ec, er);
             }
         }
@@ -535,13 +645,14 @@ impl World {
                 .position(|b| b.col == c && b.row == r && b.kind != BrickKind::Steel)
             {
                 self.bricks.swap_remove(pos);
-                self.on_brick_destroyed();
+                self.on_brick_destroyed(brick_center(c, r));
             }
         }
     }
 
-    /// Score one destroyed brick with the run score multiplier axis.
-    fn on_brick_destroyed(&mut self) {
+    /// Score one destroyed brick with the run score multiplier axis, then
+    /// roll a powerup drop at its centre (FR-31: chance from tuning).
+    fn on_brick_destroyed(&mut self, at: (f32, f32)) {
         let award = self.score.on_brick_destroyed();
         let scaled = (award as f32 * self.modifiers.score_mul) as u64;
         // Replace the unscaled award with the scaled one.
@@ -551,7 +662,161 @@ impl World {
             .saturating_sub(u64::from(award))
             .saturating_add(scaled);
         self.bricks_destroyed = self.bricks_destroyed.saturating_add(1);
+        self.events.push(SimEvent::BrickDestroyed {
+            combo: self.score.combo,
+        });
+        self.maybe_drop(at);
     }
+
+    /// Roll one drop at a destroyed brick's centre (FR-31). The kind is
+    /// drawn from the sim RNG, so drops are deterministic per seed.
+    fn maybe_drop(&mut self, at: (f32, f32)) {
+        if self.capsules.len() >= tuning::CAPSULE_MAX {
+            return;
+        }
+        let rate = (tuning::DROP_RATE_DEFAULT + self.modifiers.drop_rate_add).clamp(0.0, 1.0);
+        if self.rng.gen_bool(rate) {
+            let kind =
+                PowerKind::ALL[self.rng.next_u32_below(PowerKind::ALL.len() as u32) as usize];
+            self.capsules.push(Capsule {
+                x: at.0,
+                y: at.1,
+                kind,
+            });
+            self.events.push(SimEvent::DropSpawned);
+        }
+    }
+
+    /// Fire one laser projectile from the paddle (FR-32). Capped; extra
+    /// presses while capped are ignored (never queued).
+    fn fire_laser(&mut self) {
+        if self.shots.len() >= tuning::LASER_MAX_SHOTS {
+            return;
+        }
+        self.shots.push(Shot {
+            x: self.paddle_x,
+            y: tuning::PADDLE_Y - 2.0,
+        });
+        self.events.push(SimEvent::ShotFired);
+    }
+
+    /// Fall capsules, collect on paddle contact, miss past the kill line.
+    fn step_capsules(&mut self, dt: f32) {
+        let w = self.paddle_width();
+        let px = self.paddle_x;
+        let mut collected: Vec<PowerKind> = Vec::new();
+        let mut kept = Vec::with_capacity(self.capsules.len());
+        let pull = self.modifiers.magnet_strength;
+        for cap in self.capsules.drain(..) {
+            let y = cap.y + tuning::POWERUP_FALL_SPEED * dt;
+            // Magnet axis: drift toward the paddle, capped at pull px/s.
+            let x = if pull > 0.0 {
+                cap.x + (px - cap.x).clamp(-pull * dt, pull * dt)
+            } else {
+                cap.x
+            };
+            // Paddle overlap (capsule is 11x7): collect.
+            if (cap.x - px).abs() <= w / 2.0 + 5.5
+                && y + 3.5 >= tuning::PADDLE_Y
+                && y - 3.5 <= tuning::PADDLE_Y + tuning::PADDLE_H
+            {
+                collected.push(cap.kind);
+            } else if y <= tuning::KILL_Y + 4.0 {
+                kept.push(Capsule {
+                    x,
+                    y,
+                    kind: cap.kind,
+                });
+            }
+        }
+        self.capsules = kept;
+        for kind in collected {
+            self.apply_collect(kind);
+        }
+    }
+
+    /// Apply one collected capsule.
+    fn apply_collect(&mut self, kind: PowerKind) {
+        self.events.push(SimEvent::Collected(kind));
+        match kind {
+            PowerKind::Multiball => self.split_balls(),
+            PowerKind::OneUp => {
+                self.lives += 1;
+            }
+            timed => {
+                let slow_was = self.effects.slow_active();
+                self.effects.refresh(timed);
+                if self.effects.slow_active() != slow_was {
+                    self.renormalise_balls();
+                }
+            }
+        }
+    }
+
+    /// Multiball: split every flying ball in two (FR-32/34). Stuck balls
+    /// are not split. Stops at the hard cap; a life is still lost only
+    /// when the last ball is gone.
+    fn split_balls(&mut self) {
+        let parents = self.balls.len();
+        for i in 0..parents {
+            if self.balls.len() >= tuning::MULTIBALL_CAP {
+                break;
+            }
+            if self.balls[i].stuck {
+                continue;
+            }
+            let (vx, vy) = (self.balls[i].vx, self.balls[i].vy);
+            let sp = (vx * vx + vy * vy).sqrt().max(1.0);
+            let base = vy.atan2(vx);
+            // Alternate sides so repeated pickups fan out deterministically.
+            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let ang = base + side * tuning::MULTIBALL_SPLIT_RAD;
+            self.balls.push(Ball {
+                x: self.balls[i].x,
+                y: self.balls[i].y,
+                vx: ang.cos() * sp,
+                vy: ang.sin() * sp,
+                stuck: false,
+            });
+        }
+        self.renormalise_balls();
+    }
+
+    /// Move laser shots; each damages the first brick it touches.
+    fn step_shots(&mut self, dt: f32) {
+        let mut kept = Vec::with_capacity(self.shots.len());
+        let mut hits: Vec<(u8, u8)> = Vec::new();
+        for s in self.shots.drain(..) {
+            let y = s.y - tuning::LASER_SPEED * dt;
+            if y < tuning::PLAY_TOP {
+                continue;
+            }
+            let hit = self.bricks.iter().find(|b| {
+                let (bx, by, bw, bh) = b.aabb();
+                s.x >= bx - 1.5 && s.x <= bx + bw + 1.5 && y >= by - 1.5 && y <= by + bh + 1.5
+            });
+            match hit {
+                None => kept.push(Shot { x: s.x, y }),
+                Some(b) => hits.push((b.col, b.row)),
+            }
+        }
+        self.shots = kept;
+        // Resolve by cell (indices shift under swap_remove).
+        for (c, r) in hits {
+            if let Some(bi) = self.bricks.iter().position(|b| b.col == c && b.row == r) {
+                self.damage_brick(bi);
+            }
+        }
+        self.renormalise_balls();
+    }
+}
+
+/// Centre of a brick cell in logical pixels (for drops and bursts).
+fn brick_center(col: u8, row: u8) -> (f32, f32) {
+    (
+        tuning::GRID_ORIGIN_X + f32::from(col) * tuning::BRICK_CELL_W + tuning::BRICK_DRAW_W / 2.0,
+        tuning::GRID_ORIGIN_Y + f32::from(row) * tuning::BRICK_CELL_H + tuning::BRICK_DRAW_H / 2.0,
+    )
 }
 
 /// Enforce the minimum vertical component (FR-15): the ball can never enter
@@ -718,6 +983,10 @@ pub struct ReplaySummary {
     pub best_combo: u32,
     /// Final ball integer positions (for byte-stability).
     pub ball_q: Vec<(i32, i32)>,
+    /// Falling capsules left (drops are deterministic per seed).
+    pub capsules: usize,
+    /// Active timed effects bitmask (laser/sticky/wide/slow/pierce).
+    pub effects_mask: u8,
 }
 
 /// Replay `inputs` (one per fixed step) headlessly.
@@ -745,6 +1014,12 @@ pub fn replay(
             .iter()
             .map(|b| ((b.x * 1000.0) as i32, (b.y * 1000.0) as i32))
             .collect(),
+        capsules: w.capsules.len(),
+        effects_mask: (u8::from(w.effects.laser_active())
+            | (u8::from(w.effects.sticky_active()) << 1)
+            | (u8::from(w.effects.wide_active()) << 2)
+            | (u8::from(w.effects.slow_active()) << 3)
+            | (u8::from(w.effects.pierce_active()) << 4)),
     }
 }
 
@@ -874,6 +1149,206 @@ mod tests {
         assert_eq!(w.score.combo, 2);
         w.score.on_paddle_contact();
         assert_eq!(w.score.combo, 0);
+    }
+
+    #[test]
+    fn multiball_splits_and_caps() {
+        let mut w = World::new(vec![brick_at(9, 1, 1)], 1, 0, RunModifiers::default());
+        w.balls.clear();
+        w.balls.push(Ball {
+            x: 160.0,
+            y: 100.0,
+            vx: 0.0,
+            vy: -160.0,
+            stuck: false,
+        });
+        w.apply_collect(PowerKind::Multiball);
+        assert_eq!(w.balls.len(), 2);
+        // Repeated pickups fan out but stop at the hard cap.
+        for _ in 0..10 {
+            w.apply_collect(PowerKind::Multiball);
+        }
+        assert_eq!(w.balls.len(), tuning::MULTIBALL_CAP);
+    }
+
+    #[test]
+    fn sticky_catches_and_releases() {
+        // A far 5 HP brick keeps the level alive: an empty grid (or
+        // steel-only, which never counts) would clear on the first step
+        // and freeze the sim.
+        let mut w = World::new(vec![brick_at(0, 0, 5)], 1, 0, RunModifiers::default());
+        w.balls.clear();
+        w.balls.push(Ball {
+            x: w.paddle_x,
+            y: tuning::PADDLE_Y - 10.0,
+            vx: 0.0,
+            vy: 160.0,
+            stuck: false,
+        });
+        w.effects.refresh(PowerKind::Sticky);
+        // Fall onto the paddle: catch, not bounce.
+        for _ in 0..120 {
+            w.step(InputState::default(), tuning::DT);
+            if w.balls.iter().any(|b| b.stuck) {
+                break;
+            }
+        }
+        assert!(w.balls.iter().any(|b| b.stuck), "sticky did not catch");
+        // Space relaunches.
+        w.step(
+            InputState {
+                launch: true,
+                ..Default::default()
+            },
+            tuning::DT,
+        );
+        assert!(!w.balls.iter().any(|b| b.stuck), "sticky did not release");
+    }
+
+    #[test]
+    fn pierce_passes_through() {
+        let mut w = World::new(
+            vec![brick_at(9, 2, 1), brick_at(9, 3, 1)],
+            1,
+            0,
+            RunModifiers::default(),
+        );
+        w.effects.refresh(PowerKind::Pierce);
+        w.balls.clear();
+        w.balls.push(Ball {
+            x: 160.0,
+            y: 30.0,
+            vx: 0.0,
+            vy: 200.0,
+            stuck: false,
+        });
+        let vy0 = w.balls[0].vy;
+        for _ in 0..240 {
+            w.step(InputState::default(), tuning::DT);
+            if w.remaining() == 0 {
+                break;
+            }
+        }
+        assert_eq!(w.remaining(), 0, "pierce did not clear both bricks");
+        // Still moving down: no reflection happened.
+        assert!(
+            w.balls[0].vy > 0.0,
+            "pierce reflected: vy={}",
+            w.balls[0].vy
+        );
+        assert!((w.balls[0].vy - vy0).abs() < 60.0, "pierce changed speed");
+    }
+
+    #[test]
+    fn slow_scales_and_expiry_restores() {
+        let mut w = empty_world();
+        let base = w.target_speed();
+        w.apply_collect(PowerKind::Slow);
+        assert!((w.target_speed() - base * tuning::SLOW_FACTOR).abs() < 1e-3);
+        w.effects.tick(tuning::POWERUP_DUR_SLOW + 1.0);
+        // Expiry renormalises on the next step.
+        w.balls.clear();
+        w.balls.push(Ball {
+            x: 160.0,
+            y: 100.0,
+            vx: 0.0,
+            vy: -100.0,
+            stuck: false,
+        });
+        w.step(InputState::default(), tuning::DT);
+        let sp = (w.balls[0].vx * w.balls[0].vx + w.balls[0].vy * w.balls[0].vy).sqrt();
+        assert!(
+            (sp - base).abs() < 1.0,
+            "slow left permanent speed: {sp} vs {base}"
+        );
+    }
+
+    #[test]
+    fn wide_grows_and_expiry_resets_paddle() {
+        let mut w = empty_world();
+        let narrow = w.paddle_width();
+        w.apply_collect(PowerKind::Wide);
+        assert!(w.paddle_width() > narrow + 10.0);
+        w.effects.tick(tuning::POWERUP_DUR_WIDE + 1.0);
+        assert!(
+            (w.paddle_width() - narrow).abs() < 1e-3,
+            "wide left residue"
+        );
+    }
+
+    #[test]
+    fn one_up_grants_a_life() {
+        let mut w = empty_world();
+        let lives = w.lives;
+        w.apply_collect(PowerKind::OneUp);
+        assert_eq!(w.lives, lives + 1);
+    }
+
+    #[test]
+    fn capsule_falls_and_collects() {
+        let mut w = empty_world();
+        w.balls.clear(); // no interference; capsules fall regardless
+        w.capsules.push(Capsule {
+            x: w.paddle_x,
+            y: tuning::PADDLE_Y - 40.0,
+            kind: PowerKind::Wide,
+        });
+        for _ in 0..600 {
+            w.step_capsules(tuning::DT);
+            if w.capsules.is_empty() {
+                break;
+            }
+        }
+        assert!(w.capsules.is_empty(), "capsule never collected");
+        assert!(w.effects.wide_active());
+    }
+
+    #[test]
+    fn missed_capsule_is_lost() {
+        let mut w = empty_world();
+        w.balls.clear();
+        w.capsules.push(Capsule {
+            x: tuning::PLAY_X + 2.0, // far from centred paddle
+            y: tuning::PADDLE_Y - 10.0,
+            kind: PowerKind::Wide,
+        });
+        for _ in 0..600 {
+            w.step_capsules(tuning::DT);
+        }
+        assert!(w.capsules.is_empty());
+        assert!(!w.effects.wide_active());
+    }
+
+    #[test]
+    fn laser_fires_capped_and_hits() {
+        let mut w = World::new(vec![brick_at(9, 1, 1)], 1, 0, RunModifiers::default());
+        w.effects.refresh(PowerKind::Laser);
+        for _ in 0..tuning::LASER_MAX_SHOTS + 2 {
+            w.fire_laser();
+        }
+        assert_eq!(w.shots.len(), tuning::LASER_MAX_SHOTS);
+        for _ in 0..480 {
+            w.step_shots(tuning::DT);
+            if w.remaining() == 0 {
+                break;
+            }
+        }
+        assert_eq!(w.remaining(), 0, "laser never hit");
+    }
+
+    #[test]
+    fn replay_with_drops_is_stable() {
+        // Long-enough run that drops + collects happen; identical twice.
+        let bricks = super::super::level::default_bricks();
+        let mut inputs = vec![InputState::default(); 4800];
+        for (i, inp) in inputs.iter_mut().enumerate() {
+            inp.right = i % 200 < 100;
+            inp.left = !inp.right;
+            inp.launch = i == 5;
+        }
+        let a = replay(bricks.clone(), 7, 0, RunModifiers::default(), &inputs);
+        let b = replay(bricks, 7, 0, RunModifiers::default(), &inputs);
+        assert_eq!(a, b);
     }
 
     #[test]

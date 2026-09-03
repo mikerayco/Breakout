@@ -83,3 +83,32 @@ appears and recovers).
 - [ ] `direct` transport renders correctly (may be slower — record its P99)
 - [ ] after `q`, no leftover image in scrollback
 - [ ] Phase 0's failure-path checks still pass (panic + SIGINT + typed echo)
+
+## Phases 2-8 — implementation gates (this machine, no Ghostty)
+
+All automated gates green on 2026-09-03 (Linux, no graphics/audio device):
+
+| Command | Result |
+| --- | --- |
+| `cargo build --release` | clean |
+| `cargo test` | 70 passed, 0 failed (physics, determinism, soak, parser+proptest, powerups, perks, run sim, save recovery, audio decode) |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `breakout --validate assets/levels/campaign` | 16 valid, 0 invalid |
+| `breakout --level /tmp/bad.lvl` | exit 1, `/tmp/bad.lvl: line 2, column 5: unknown character 'Z'`, no panic |
+| `echo n \| breakout --reset-profile` | exit 0, profile untouched |
+| `echo y \| breakout --reset-profile` | exit 0, profile wiped |
+| `breakout --caps` | report + `audio: available`, exit 0 |
+
+Headless 10-minute AI soak (144k steps): no escape, no overspeed, no
+horizontal loop. Scripted 8-level run replays byte-identically (NFR-10
+harness). `PULSE_SERVER=/nonexistent` game run and muted/unmuted runs
+need a graphics terminal: pending Mike.
+
+## Phase 9 — final numbers (Mike's machines)
+
+- [ ] macOS/Ghostty: p99 ≤ 16.6 ms with bloom on, 200+ particles, shake
+- [ ] `--no-bloom` saving recorded here
+- [ ] Linux/Ghostty: full run plays, same gates
+- [ ] `cargo install --path .` then `breakout` from `/tmp` on both
+- [ ] Three runs in a row, unprompted (success criterion 5)

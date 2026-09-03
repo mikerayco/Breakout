@@ -299,9 +299,286 @@ pub fn draw_world(
     }
 }
 
+/// Falling capsule body width, logical px (MOCKUP: 11x7 rounded rect,
+/// 1-letter glyph inside, gentle 2px vertical bob).
+pub const CAPSULE_W: f32 = 11.0;
+/// Capsule body height.
+pub const CAPSULE_H: f32 = 7.0;
+/// Powerup HUD icon size, logical px (MOCKUP: 9x9 + 1px bar).
+pub const POWERUP_ICON: f32 = 9.0;
+/// Powerup HUD slot origin x, logical px (MOCKUP: 232).
+pub const POWERUP_HUD_X: f32 = 232.0;
+
+/// Falling capsules (FR-31): powerup-coloured bodies with 1-letter
+/// glyphs. `bob` is the gentle vertical offset in logical px.
+pub fn draw_capsules(
+    fb: &mut Framebuffer,
+    capsules: &[crate::game::powerup::Capsule],
+    ox: f32,
+    oy: f32,
+    bob: f32,
+) {
+    let s = fb.scale() as f32;
+    let si = fb.scale();
+    for cap in capsules {
+        let cx = (cap.x + ox) * s;
+        let cy = (cap.y + oy + bob) * s;
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(
+                cx - CAPSULE_W / 2.0 * s,
+                cy - CAPSULE_H / 2.0 * s,
+                CAPSULE_W * s,
+                CAPSULE_H * s,
+            )
+            .expect("capsule"),
+            &solid(*palette::POWERUP),
+            identity(),
+            None,
+        );
+        let glyph = cap.kind.glyph().to_string();
+        draw_text(
+            fb.pixmap_mut(),
+            (cx - 2.5 * s) as i32,
+            (cy - 3.5 * s) as i32,
+            &glyph,
+            *TEXT,
+            si,
+        );
+    }
+}
+
+/// Laser projectiles (FR-32): small bright bolts above the paddle.
+pub fn draw_shots(fb: &mut Framebuffer, shots: &[crate::game::powerup::Shot], ox: f32, oy: f32) {
+    let s = fb.scale() as f32;
+    for shot in shots {
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(
+                (shot.x + ox) * s - s,
+                (shot.y + oy) * s - 3.0 * s,
+                2.0 * s,
+                6.0 * s,
+            )
+            .expect("shot"),
+            &solid(*palette::PADDLE_CAP),
+            identity(),
+            None,
+        );
+    }
+}
+
+/// Active timed powerups with remaining-time bars (FR-12/33, MOCKUP: up
+/// to 4 icons of 9x9 with a depleting 1px bar beneath).
+pub fn draw_powerup_hud(fb: &mut Framebuffer, effects: &crate::game::powerup::ActiveEffects) {
+    use crate::game::powerup::PowerKind;
+    let s = fb.scale() as f32;
+    let si = fb.scale();
+    let timed = [
+        PowerKind::Laser,
+        PowerKind::Sticky,
+        PowerKind::Wide,
+        PowerKind::Slow,
+        PowerKind::Pierce,
+    ];
+    let mut slot = 0u32;
+    for kind in timed {
+        let left = effects.remaining(kind);
+        if left <= 0.0 {
+            continue;
+        }
+        if slot >= 4 {
+            break;
+        }
+        let x = (POWERUP_HUD_X + slot as f32 * (POWERUP_ICON + 2.0)) * s;
+        let y = 5.0 * s;
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(x, y, POWERUP_ICON * s, POWERUP_ICON * s).expect("powerup icon"),
+            &solid(*palette::POWERUP),
+            identity(),
+            None,
+        );
+        let glyph = kind.glyph().to_string();
+        draw_text(
+            fb.pixmap_mut(),
+            (x + 2.0 * s) as i32,
+            (y + s) as i32,
+            &glyph,
+            *TEXT,
+            si,
+        );
+        let frac = (left / kind.duration()).clamp(0.0, 1.0);
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(x, y + POWERUP_ICON * s + s, POWERUP_ICON * s * frac, s)
+                .expect("powerup bar"),
+            &solid(*palette::BALL_GLOW),
+            identity(),
+            None,
+        );
+        slot += 1;
+    }
+}
+
+/// Dim the play area to 25% brightness behind offer/summary cards.
+pub fn draw_dim(fb: &mut Framebuffer) {
+    let s = fb.scale() as f32;
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(0, 0, 0, 191);
+    paint.anti_alias = false;
+    fb.pixmap_mut().fill_rect(
+        Rect::from_xywh(7.0 * s, 21.0 * s, 306.0 * s, (240.0 - 21.0) * s).expect("dim"),
+        &paint,
+        identity(),
+        None,
+    );
+}
+
+/// Perk offer: title + stacked cards over the dimmed playfield, one
+/// highlighted (FR-40). Keys: 1/2/3, arrows + Enter, Esc abandons.
+pub fn draw_offer(fb: &mut Framebuffer, choices: &[crate::game::perk::Perk], selected: usize) {
+    let s = fb.scale() as f32;
+    let si = fb.scale();
+    draw_dim(fb);
+    let title = "CHOOSE A PERK";
+    let tw = super::text::text_width(title, si) as f32;
+    let fb_w = fb.width() as f32;
+    draw_text(
+        fb.pixmap_mut(),
+        ((fb_w - tw) / 2.0) as i32,
+        (52 * si) as i32,
+        title,
+        *TEXT,
+        si,
+    );
+    for (i, perk) in choices.iter().enumerate() {
+        let y = 76.0 + i as f32 * 44.0;
+        let sel = i == selected % choices.len().max(1);
+        let border = if sel {
+            *palette::PADDLE
+        } else {
+            *palette::TEXT_DIM
+        };
+        // Card outline with a 12px margin.
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(12.0 * s, y * s, (320.0 - 24.0) * s, 38.0 * s).expect("card"),
+            &solid(border),
+            identity(),
+            None,
+        );
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(13.0 * s, (y + 1.0) * s, (320.0 - 26.0) * s, 36.0 * s)
+                .expect("card fill"),
+            &solid(*palette::BG_HUD),
+            identity(),
+            None,
+        );
+        let head = format!("{} {}", i + 1, perk.name);
+        draw_text(
+            fb.pixmap_mut(),
+            (20 * si) as i32,
+            ((y + 6.0) * s) as i32,
+            &head,
+            if sel { *palette::PADDLE } else { *TEXT },
+            si,
+        );
+        draw_text(
+            fb.pixmap_mut(),
+            (20 * si) as i32,
+            ((y + 18.0) * s) as i32,
+            perk.description,
+            *palette::TEXT_DIM,
+            si,
+        );
+    }
+}
+
+/// Run summary (FR-42): score, levels, bricks, combo, perks, shards.
+pub fn draw_summary(fb: &mut Framebuffer, summary: &crate::game::run::RunSummary) {
+    let si = fb.scale();
+    draw_dim(fb);
+    let lines = [
+        "RUN COMPLETE".to_string(),
+        format!("SCORE {}", summary.score),
+        format!("LEVELS {}/8", summary.levels_cleared),
+        format!("BRICKS {}", summary.bricks_destroyed),
+        format!("BEST COMBO X{}", summary.best_combo.max(1)),
+        format!("SHARDS +{}", summary.shards),
+        format!("SEED {}", summary.seed),
+    ];
+    let fb_w = fb.width() as f32;
+    for (i, line) in lines.iter().enumerate() {
+        let w = super::text::text_width(line, si) as f32;
+        draw_text(
+            fb.pixmap_mut(),
+            ((fb_w - w) / 2.0) as i32,
+            (52 * si + i as u32 * 14 * si) as i32,
+            line,
+            if i == 0 { *palette::COMBO } else { *TEXT },
+            si,
+        );
+    }
+    let perks = if summary.perks.is_empty() {
+        "PERKS: NONE".to_string()
+    } else {
+        format!("PERKS: {}", summary.perks.join(","))
+    };
+    let w = super::text::text_width(&perks, si) as f32;
+    draw_text(
+        fb.pixmap_mut(),
+        ((fb_w - w) / 2.0) as i32,
+        (52 * si + lines.len() as u32 * 14 * si) as i32,
+        &perks,
+        *palette::TEXT_DIM,
+        si,
+    );
+}
+
+/// Taken-perk chips along the playfield bottom-left (MOCKUP: 7x7 chips at
+/// y = 231, visible on pause — never cluttering live play).
+pub fn draw_perk_chips(fb: &mut Framebuffer, perks: &[crate::game::perk::PerkId]) {
+    let s = fb.scale() as f32;
+    let si = fb.scale();
+    for (i, id) in perks.iter().enumerate() {
+        let x = (10.0 + i as f32 * 10.0) * s;
+        let y = 231.0 * s;
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(x, y, 7.0 * s, 7.0 * s).expect("chip"),
+            &solid(*palette::TEXT_DIM),
+            identity(),
+            None,
+        );
+        let initial = crate::game::perk::PERKS
+            .iter()
+            .find(|p| p.id == *id)
+            .map(|p| p.name.chars().next().unwrap_or('?').to_string())
+            .unwrap_or_else(|| "?".to_string());
+        draw_text(
+            fb.pixmap_mut(),
+            (x + s) as i32,
+            y as i32,
+            &initial,
+            *TEXT,
+            si,
+        );
+    }
+}
+
+/// Title progress line: persistent shards and runs at a glance.
+pub fn draw_title_stats(fb: &mut Framebuffer, shards: u64, runs: u32) {
+    let si = fb.scale();
+    let line = format!("SHARDS {}  RUNS {}", shards, runs);
+    let w = super::text::text_width(&line, si) as f32;
+    let fb_w = fb.width() as f32;
+    draw_text(
+        fb.pixmap_mut(),
+        ((fb_w - w) / 2.0) as i32,
+        (150 * si) as i32,
+        &line,
+        *palette::TEXT_DIM,
+        si,
+    );
+}
+
 /// Phase 1 animated test card: scrolling gradient, bouncing AA circle,
-/// colour-bar strip, and a live FPS/frame-time overlay (PLAN Phase 1 §2, §9).
-/// Kept for headless regression + PNG preview; the game loop draws draw_world.
+/// colour-bar strip, and a live FPS/frame-time overlay (PLAN Phase 1).
 #[allow(dead_code)]
 pub struct TestCard {
     t_secs: f32,
