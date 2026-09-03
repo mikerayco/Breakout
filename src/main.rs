@@ -79,9 +79,10 @@ fn install_panic_hook() {
 fn run_loop(cli: Cli) -> anyhow::Result<()> {
     use crossterm::event::Event;
     use game::{
-        physics::{InputState, RunModifiers},
+        physics::{BrickKind, InputState, RunModifiers},
         tuning,
     };
+    use render::draw::JuiceView;
     use render::Frames;
     use term::input::{Action, Poller};
 
@@ -104,9 +105,27 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
     let mut launch_edge = false;
     let mut muted = cli.no_audio;
     let mut debug = false;
+    let mut bloom_on = !cli.no_bloom;
     let mut pause_selected: usize = 0;
     // NFR-2 readout: last measured key-to-movement latency.
     let mut latency_ms: Option<f32> = None;
+
+    // Phase 4 juice state (all allocated once, reused every frame — no
+    // per-frame allocation on the hot path).
+    let mut pool = render::particles::Pool::new();
+    let mut shake = render::camera::Shake::new();
+    let mut vrng = fastrand::Rng::with_seed(seed ^ 0x9E3779B9);
+    let mut trails: Vec<std::collections::VecDeque<(f32, f32)>> = Vec::new();
+    let mut brick_flashes: Vec<(u8, u8)> = Vec::new();
+    let mut rings: Vec<(f32, f32, f32)> = Vec::new();
+    let mut prev_bricks: Vec<(u8, u8, u8, BrickKind)> = Vec::new();
+    let mut prev_lives = world.lives;
+    let mut prev_combo = 0u32;
+    let mut prev_run: u64 = 0;
+    let mut run_id: u64 = 0;
+    let mut hit_stop = 0.0f32;
+    let mut paddle_flash_t = 0.0f32;
+    let mut combo_pop_t = 0.0f32;
 
     let mut accumulator = 0.0f32;
     let mut last_frame = Instant::now();
@@ -157,11 +176,12 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
                             &mut pause_selected,
                             &mut muted,
                             cli.seed,
+                            &mut run_id,
                         ) {
                             return Ok(());
                         }
                     } else {
-                        advance_state(&mut world);
+                        advance_state(&mut world, &mut run_id);
                     }
                 }
                 Action::MenuConfirm => {
@@ -171,11 +191,12 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
                             &mut pause_selected,
                             &mut muted,
                             cli.seed,
+                            &mut run_id,
                         ) {
                             return Ok(());
                         }
                     } else if world.state != GameState::Playing {
-                        advance_state(&mut world);
+                        advance_state(&mut world, &mut run_id);
                     } else {
                         launch_edge = true;
                     }
@@ -193,6 +214,9 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
                 Action::Mute => {
                     muted = !muted;
                 }
+                Action::Bloom => {
+                    bloom_on = !bloom_on;
+                }
                 Action::Debug => {
                     debug = !debug;
                 }
@@ -208,10 +232,17 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
         }
         frames.record_presented(now);
 
-        // Fixed-timestep accumulator (ADR-0006).
+        // Fixed-timestep accumulator (ADR-0006). Hit-stop (FR-26) freezes
+        // the simulation while rendering continues: the accumulator is
+        // consumed without stepping.
         let elapsed = (now - last_frame).as_secs_f32().min(0.25);
         last_frame = now;
-        if world.state == GameState::Playing {
+        if hit_stop > 0.0 {
+            hit_stop -= elapsed;
+            accumulator = 0.0;
+            launch_edge = false;
+        }
+        if world.state == GameState::Playing && hit_stop <= 0.0 {
             let held = poller.held(now);
             // NFR-2 probe: if a movement key was pressed and the paddle is
             // now moving, the key-to-movement delay is (now - press).
@@ -240,9 +271,65 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
             if accumulator >= tuning::DT {
                 accumulator = 0.0;
             }
-        } else {
+        } else if world.state != GameState::Playing {
             accumulator = 0.0;
             launch_edge = false;
+        }
+
+        // Juice events: diff the sim bricks against last frame (no
+        // allocation — the buffers are reused). A changed run id means a
+        // fresh level, so snapshot quietly instead of bursting.
+        if run_id != prev_run {
+            prev_run = run_id;
+            pool = render::particles::Pool::new();
+            trails.clear();
+            rings.clear();
+            brick_flashes.clear();
+            hit_stop = 0.0;
+            paddle_flash_t = 0.0;
+            combo_pop_t = 0.0;
+            snapshot_bricks(&world, &mut prev_bricks);
+            prev_lives = world.lives;
+            prev_combo = world.score.combo;
+        } else if hit_stop <= 0.0 {
+            poll_juice_events(
+                &world,
+                &mut prev_bricks,
+                &mut prev_lives,
+                &mut prev_combo,
+                &mut pool,
+                &mut vrng,
+                &mut shake,
+                &mut rings,
+                &mut brick_flashes,
+                &mut hit_stop,
+                &mut paddle_flash_t,
+                &mut combo_pop_t,
+            );
+        }
+        // Cosmetic timers always advance on render time (even in hit-stop).
+        paddle_flash_t = (paddle_flash_t - elapsed).max(0.0);
+        combo_pop_t = (combo_pop_t - elapsed).max(0.0);
+        for ring in &mut rings {
+            ring.2 = (ring.2 + elapsed / render::draw::COMBO_POP_SECS).min(1.0);
+        }
+        rings.retain(|r| r.2 < 1.0);
+        pool.update(elapsed);
+        // Camera offset for this frame (decays on render time).
+        let (ox, oy) = shake.offset(&mut vrng, elapsed);
+        // Ball trails: ring buffers of past positions (FR-27).
+        if trails.len() != world.balls.len() {
+            trails.resize_with(world.balls.len(), Default::default);
+        }
+        for (hist, ball) in trails.iter_mut().zip(world.balls.iter()) {
+            if ball.stuck {
+                hist.clear();
+            } else {
+                hist.push_back((ball.x, ball.y));
+                while hist.len() > render::draw::TRAIL_N {
+                    hist.pop_front();
+                }
+            }
         }
 
         // Resize (FR-10), live recovery from too-small (FR-11).
@@ -259,7 +346,25 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
         }
 
         if let Some(cur) = &mut fb {
-            render::draw::draw_world(cur, &world, muted);
+            let jv = JuiceView {
+                ox,
+                oy,
+                brick_flashes: &brick_flashes,
+                paddle_flash: paddle_flash_t > 0.0,
+                rings: &rings,
+                combo_pop: combo_pop_t > 0.0,
+            };
+            render::draw::draw_world(cur, &world, muted, &jv);
+            for (hist, ball) in trails.iter().zip(world.balls.iter()) {
+                if hist.len() > 1 && !ball.stuck {
+                    render::draw::draw_trail(cur, hist, ox, oy);
+                }
+            }
+            let pscale = cur.scale() as f32;
+            pool.draw(cur.pixmap_mut(), pscale, ox, oy);
+            if bloom_on {
+                render::bloom::apply(cur.pixmap_mut());
+            }
             if world.state == GameState::Paused {
                 render::draw::draw_pause_menu(cur, pause_selected, muted);
             }
@@ -275,7 +380,7 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
             if debug {
                 let held = poller.held(now);
                 line = format!(
-                    "{line} IN={} HELD={}{} LAT={} VEL={:.0} BALLS={} MUTE={}",
+                    "{line} IN={} HELD={}{} LAT={} VEL={:.0} BALLS={} MUTE={} BLOOM={} P={} SHK={:.1}",
                     if poller.is_legacy() {
                         "legacy"
                     } else {
@@ -287,6 +392,9 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
                     world.paddle_vel,
                     world.balls.len(),
                     if muted { "ON" } else { "OFF" },
+                    if bloom_on { "ON" } else { "OFF" },
+                    pool.len(),
+                    shake.magnitude(),
                 );
             }
             render::draw::draw_fps_line(cur, &line);
@@ -299,6 +407,88 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
+/// Snapshot the brick grid into a reusable buffer (no allocation after
+/// the first frames once capacity settles).
+fn snapshot_bricks(world: &World, out: &mut Vec<(u8, u8, u8, game::physics::BrickKind)>) {
+    out.clear();
+    out.extend(world.bricks.iter().map(|b| (b.col, b.row, b.hp, b.kind)));
+}
+
+/// Diff last frame's bricks against this frame's and fire juice: bursts,
+/// explosions, rings, flashes, shake and hit-stop. All buffers are owned
+/// by the caller and reused (no per-frame allocation).
+#[allow(clippy::too_many_arguments)]
+fn poll_juice_events(
+    world: &World,
+    prev_bricks: &mut Vec<(u8, u8, u8, game::physics::BrickKind)>,
+    prev_lives: &mut i32,
+    prev_combo: &mut u32,
+    pool: &mut render::particles::Pool,
+    vrng: &mut fastrand::Rng,
+    shake: &mut render::camera::Shake,
+    rings: &mut Vec<(f32, f32, f32)>,
+    brick_flashes: &mut Vec<(u8, u8)>,
+    hit_stop: &mut f32,
+    paddle_flash_t: &mut f32,
+    combo_pop_t: &mut f32,
+) {
+    use game::physics::BrickKind;
+    use game::tuning;
+    use render::{camera, draw, particles};
+
+    brick_flashes.clear();
+    for (pc, pr, php, pkind) in prev_bricks.iter().copied() {
+        match world.bricks.iter().find(|b| b.col == pc && b.row == pr) {
+            None => {
+                // Destroyed this frame.
+                let cx = tuning::GRID_ORIGIN_X
+                    + f32::from(pc) * tuning::BRICK_CELL_W
+                    + tuning::BRICK_DRAW_W / 2.0;
+                let cy = tuning::GRID_ORIGIN_Y
+                    + f32::from(pr) * tuning::BRICK_CELL_H
+                    + tuning::BRICK_DRAW_H / 2.0;
+                match pkind {
+                    BrickKind::Steel => {}
+                    BrickKind::Normal => {
+                        let tmp = game::physics::Brick::normal(pc, pr, php);
+                        let n = vrng.u32(particles::BURST_N_MIN..=particles::BURST_N_MAX);
+                        pool.burst(&mut *vrng, cx, cy, draw::brick_rgb(&tmp), n);
+                        shake.add(camera::SHAKE_BRICK);
+                    }
+                    BrickKind::Explosive => {
+                        let tmp = game::physics::Brick::explosive(pc, pr);
+                        pool.explosion(&mut *vrng, cx, cy, draw::brick_rgb(&tmp));
+                        if rings.len() < 16 {
+                            rings.push((cx, cy, 0.0));
+                        }
+                        shake.add(camera::SHAKE_EXPLOSION);
+                    }
+                }
+                if pkind != BrickKind::Steel {
+                    *hit_stop = hit_stop.max(tuning::hit_stop_secs(world.score.combo));
+                }
+            }
+            Some(cur) => {
+                if cur.hp < php {
+                    brick_flashes.push((pc, pr));
+                }
+            }
+        }
+    }
+    if world.lives < *prev_lives {
+        shake.add(camera::SHAKE_LIFE_LOST);
+    }
+    if world.score.combo > *prev_combo {
+        *combo_pop_t = draw::COMBO_POP_SECS;
+    }
+    if world.score.combo == 0 && *prev_combo > 0 && !world.balls.is_empty() {
+        *paddle_flash_t = draw::PADDLE_FLASH_SECS;
+    }
+    snapshot_bricks(world, prev_bricks);
+    *prev_lives = world.lives;
+    *prev_combo = world.score.combo;
+}
+
 /// One pause-menu activation (FR-6): Resume / Restart run / Mute / Quit.
 /// Returns true when the player chose Quit (exit to shell).
 fn activate_pause_item(
@@ -306,6 +496,7 @@ fn activate_pause_item(
     selected: &mut usize,
     muted: &mut bool,
     seed_opt: Option<u64>,
+    run_id: &mut u64,
 ) -> bool {
     use game::state::StateEvent;
     match *selected % 4 {
@@ -323,6 +514,7 @@ fn activate_pause_item(
                 0,
                 world.modifiers,
             );
+            *run_id += 1;
             false
         }
         2 => {
@@ -335,7 +527,7 @@ fn activate_pause_item(
 
 /// Space/Enter on a menu state: title -> play, clear -> next level (fresh
 /// bricks for Phase 2), over -> fresh run.
-fn advance_state(world: &mut World) {
+fn advance_state(world: &mut World, run_id: &mut u64) {
     use game::state::StateEvent;
     match world.state {
         GameState::Title => {
@@ -351,6 +543,7 @@ fn advance_state(world: &mut World) {
                 world.level_index.saturating_add(1),
                 world.modifiers,
             );
+            *run_id += 1;
         }
         GameState::RunOver => {
             *world = World::new(
@@ -360,6 +553,7 @@ fn advance_state(world: &mut World) {
                 world.modifiers,
             );
             world.state = GameState::Title;
+            *run_id += 1;
         }
         GameState::Paused => {
             world.state = world

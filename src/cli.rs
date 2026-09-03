@@ -1,6 +1,4 @@
-//! CLI flag parsing — the exact flag set in PRD FR-3, nothing else.
-//!
-//! Await flag parsing here; the game logic never reads argv directly.
+//! CLI flag parsing — the flag set in PRD FR-3 plus `--no-bloom` (FR-29).
 
 use std::path::PathBuf;
 
@@ -22,6 +20,11 @@ pub struct Cli {
     /// Disable the audio subsystem entirely for this session (FR-48).
     #[arg(long)]
     pub no_audio: bool,
+
+    /// Disable the bloom pass for this session (FR-29). Also toggled live
+    /// with `F4`.
+    #[arg(long)]
+    pub no_bloom: bool,
 
     /// Presentation rate, 30-144. Frames are dropped, never queued (FR-9).
     #[arg(long, value_name = "N", default_value_t = 60, value_parser = clap::value_parser!(u32).range(30..=144))]

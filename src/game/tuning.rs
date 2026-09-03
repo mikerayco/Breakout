@@ -106,6 +106,21 @@ pub const POWERUP_FALL_SPEED: f32 = 55.0;
 /// Multiball hard cap, balls alive (resolved 2026-08-29).
 pub const MULTIBALL_CAP: usize = 8;
 
+// --- Hit-stop (FR-26, MOCKUP §4) ---
+// Freezing the sim while rendering continues is owned by the main loop
+// (ADR-0006); the durations live here because they gate simulation time.
+/// Freeze at combo 1, seconds (MOCKUP §4: ~40ms).
+pub const HIT_STOP_MAX: f32 = 0.040;
+/// Freeze at combo 8+, seconds (MOCKUP §4: 12ms).
+pub const HIT_STOP_MIN: f32 = 0.012;
+
+/// Hit-stop freeze for a brick destroyed at the given combo: scales from
+/// [`HIT_STOP_MAX`] at combo 1 down to [`HIT_STOP_MIN`] at combo 8+.
+pub fn hit_stop_secs(combo: u32) -> f32 {
+    let t = (combo.saturating_sub(1) as f32 / 7.0).clamp(0.0, 1.0);
+    HIT_STOP_MAX + (HIT_STOP_MIN - HIT_STOP_MAX) * t
+}
+
 /// Current ball speed for this level progress: base + ramp, capped.
 pub fn ball_speed(bricks_destroyed_this_level: u32, level_index: u32) -> f32 {
     let s = BALL_BASE_SPEED

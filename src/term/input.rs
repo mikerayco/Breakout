@@ -43,6 +43,8 @@ pub enum Action {
     Mute,
     /// `F3`: debug overlay toggle.
     Debug,
+    /// `F4`: bloom toggle (FR-29).
+    Bloom,
     /// Pause menu navigation.
     MenuUp,
     /// Pause menu navigation.
@@ -154,6 +156,11 @@ impl Poller {
                     self.edges.push(Action::Debug);
                 }
             }
+            KeyCode::F(4) => {
+                if matches!(key.kind, KeyEventKind::Press) {
+                    self.edges.push(Action::Bloom);
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
                 if matches!(key.kind, KeyEventKind::Press) {
                     self.edges.push(Action::MenuUp);
@@ -247,11 +254,13 @@ mod tests {
         p.observe(&press(KeyCode::Esc), now);
         p.observe(&press(KeyCode::Char('m')), now);
         p.observe(&press(KeyCode::F(3)), now);
+        p.observe(&press(KeyCode::F(4)), now);
         let edges = p.take_edges();
         assert!(edges.contains(&Action::Launch));
         assert!(edges.contains(&Action::Pause));
         assert!(edges.contains(&Action::Mute));
         assert!(edges.contains(&Action::Debug));
+        assert!(edges.contains(&Action::Bloom));
         assert!(p.take_edges().is_empty());
     }
 
