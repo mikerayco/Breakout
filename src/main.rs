@@ -41,11 +41,32 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Phase 5 developer path: validate a level directory without
+    // launching the game (no graphics probe, no terminal takeover).
+    if let Some(dir) = &cli.validate {
+        return validate_levels(dir);
+    }
+
     // --reset-profile arrives in Phase 8; refuse cleanly until then.
     if cli.reset_profile {
         eprintln!("--reset-profile arrives with the save profile in Phase 8.");
         std::process::exit(2);
     }
+
+    // FR-38: --level loads one file from disk and plays it standalone.
+    // Parsed before the graphics probe so a malformed level reports its
+    // precise error (FR-36) without needing a graphics terminal, and the
+    // terminal is never taken over for a content error.
+    let startup = match &cli.level {
+        None => StartupLevel::default_run(),
+        Some(path) => match game::level::parse_file(path) {
+            Ok(lvl) => StartupLevel::from_level(&lvl),
+            Err(e) => {
+                eprintln!("breakout: {e}");
+                std::process::exit(1);
+            }
+        },
+    };
 
     // FR-4: graphics support is mandatory, no text fallback.
     if !term::caps::probe_graphics() {
@@ -56,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     install_panic_hook();
     let guard = term::guard::TerminalGuard::enter()?;
 
-    run_loop(cli)?;
+    run_loop(cli, startup)?;
 
     drop(guard);
     Ok(())
@@ -72,14 +93,83 @@ fn install_panic_hook() {
     }));
 }
 
-/// Phase 3 game loop: protocol held-key input with legacy fallback
-/// (ADR-0004), fixed-timestep simulation (ADR-0006), pause menu (FR-6),
-/// mute + debug toggles, resize handling (FR-10/11), double-buffered
-/// transport (ADR-0002).
-fn run_loop(cli: Cli) -> anyhow::Result<()> {
+/// What the loop plays first: the default hard-coded level, or one
+/// `--level` file standalone (FR-38). Per-level knobs ride the
+/// data-driven modifier axes (ADR-0008): no special cases in physics.
+struct StartupLevel {
+    bricks: Vec<game::physics::Brick>,
+    level_index: u32,
+    modifiers: game::physics::RunModifiers,
+}
+
+impl StartupLevel {
+    /// Default: the hard-coded level at index 0 (campaign runs, Phase 8).
+    fn default_run() -> Self {
+        Self {
+            bricks: game::level::default_bricks(),
+            level_index: 0,
+            modifiers: game::physics::RunModifiers::default(),
+        }
+    }
+
+    /// One `--level` file: tier selects the speed ramp, header knobs map
+    /// onto modifier axes (ball speed, drop-rate delta).
+    fn from_level(lvl: &game::level::Level) -> Self {
+        Self {
+            bricks: lvl.bricks.clone(),
+            level_index: u32::from(lvl.tier.saturating_sub(1)),
+            modifiers: game::physics::RunModifiers {
+                ball_speed_mul: lvl.ball_speed,
+                drop_rate_add: lvl.drop_rate - game::tuning::DROP_RATE_DEFAULT,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// `--validate <dir>`: parse every `.lvl` in the directory, report one
+/// line per file plus a summary, and exit without launching the game.
+fn validate_levels(dir: &std::path::Path) -> anyhow::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| anyhow::anyhow!("cannot list {}: {e}", dir.display()))?
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "lvl").unwrap_or(false))
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut ok = 0u32;
+    let mut fail = 0u32;
+    for entry in entries {
+        let path = entry.path();
+        match game::level::parse_file(&path) {
+            Ok(lvl) => {
+                println!(
+                    "OK {} (tier {}, {} bricks)",
+                    path.display(),
+                    lvl.tier,
+                    lvl.bricks.len()
+                );
+                ok += 1;
+            }
+            Err(e) => {
+                println!("FAIL {e}");
+                fail += 1;
+            }
+        }
+    }
+    println!("{ok} valid, {fail} invalid");
+    if fail > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Game loop: protocol held-key input with legacy fallback (ADR-0004),
+/// fixed-timestep simulation (ADR-0006), pause menu (FR-6), juice (Phase 4),
+/// resize handling (FR-10/11), double-buffered transport (ADR-0002).
+fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
     use crossterm::event::Event;
     use game::{
-        physics::{BrickKind, InputState, RunModifiers},
+        physics::{BrickKind, InputState},
         tuning,
     };
     use render::draw::JuiceView;
@@ -90,12 +180,7 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
     let mut frames = Frames::new(cli.fps, transport);
 
     let seed = cli.seed.unwrap_or(0xBEEF);
-    let mut world = World::new(
-        game::level::default_bricks(),
-        seed,
-        0,
-        RunModifiers::default(),
-    );
+    let mut world = World::new(startup.bricks, seed, startup.level_index, startup.modifiers);
     world.state = GameState::Title;
 
     let mut fb = current_framebuffer(cli.scale);

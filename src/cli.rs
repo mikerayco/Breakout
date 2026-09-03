@@ -17,6 +17,11 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub level: Option<PathBuf>,
 
+    /// Parse every .lvl in a directory and report problems without
+    /// launching the game (Phase 5 developer path).
+    #[arg(long, value_name = "DIR")]
+    pub validate: Option<PathBuf>,
+
     /// Disable the audio subsystem entirely for this session (FR-48).
     #[arg(long)]
     pub no_audio: bool,
