@@ -8,13 +8,132 @@ use super::framebuffer::{identity, Framebuffer};
 use super::palette::{self, BALL, BG_DEEP, BG_HUD, TEXT};
 use super::text::draw_text;
 
+/// Phase 2: draw the simulation as flat rectangles + a flat circle.
+/// Read-only over the world (rendering never mutates simulation).
+/// No particles, glow, or shake — correctness first (PLAN Phase 2 §6).
+#[allow(clippy::too_many_lines)]
+pub fn draw_world(fb: &mut Framebuffer, world: &crate::game::physics::World) {
+    use crate::game::{physics::BrickKind, tuning};
+    let s = fb.scale() as f32;
+    let si = fb.scale();
+    let fb_w = fb.width() as f32;
+    fb.fill_rect(*BG_DEEP);
+    // HUD band + rule.
+    let hud_band = Rect::from_xywh(0.0, 0.0, fb_w, 20.0 * s).expect("hud band");
+    fb.pixmap_mut()
+        .fill_rect(hud_band, &solid(*BG_HUD), identity(), None);
+    let hud_rule = Rect::from_xywh(0.0, 20.0 * s, fb_w, s).expect("hud rule");
+    fb.pixmap_mut()
+        .fill_rect(hud_rule, &solid(*palette::BEZEL), identity(), None);
+    // Bezel walls (MOCKUP §1 logical coords, scaled).
+    for (x, y, w, h) in [
+        (0.0, 21.0, 7.0, 219.0),
+        (313.0, 21.0, 7.0, 219.0),
+        (7.0, 21.0, 306.0, 7.0),
+    ] {
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(x * s, y * s, w * s, h * s).expect("bezel"),
+            &solid(*palette::BEZEL),
+            identity(),
+            None,
+        );
+    }
+    // Bricks: flat rects coloured by tier; damaged recolours to tier below
+    // because hp already decremented (MOCKUP §2).
+    for b in &world.bricks {
+        let (bx, by, bw, bh) = b.aabb();
+        let col = match b.kind {
+            BrickKind::Steel => *palette::BRICK_STEEL,
+            BrickKind::Explosive => *palette::BRICK_EXPLOSIVE,
+            BrickKind::Normal => match b.hp {
+                1 => *palette::BRICK_1,
+                2 => *palette::BRICK_2,
+                3 => *palette::BRICK_3,
+                4 => *palette::BRICK_4,
+                _ => *palette::BRICK_5,
+            },
+        };
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(bx * s, by * s, bw * s, bh * s).expect("brick"),
+            &solid(col),
+            identity(),
+            None,
+        );
+    }
+    // Paddle: flat rect.
+    {
+        let w = world.paddle_width();
+        fb.pixmap_mut().fill_rect(
+            Rect::from_xywh(
+                (world.paddle_x - w / 2.0) * s,
+                tuning::PADDLE_Y * s,
+                w * s,
+                tuning::PADDLE_H * s,
+            )
+            .expect("paddle"),
+            &solid(*palette::PADDLE),
+            identity(),
+            None,
+        );
+    }
+    // Balls: flat AA circles.
+    for ball in &world.balls {
+        let circle =
+            PathBuilder::from_circle(ball.x * s, ball.y * s, tuning::BALL_R * s).expect("ball");
+        let mut paint = Paint::default();
+        paint.set_color(*BALL);
+        paint.anti_alias = true;
+        fb.pixmap_mut()
+            .fill_path(&circle, &paint, FillRule::Winding, identity(), None);
+    }
+    // HUD text (MOCKUP §3 slots, 5x7 font).
+    let hud = format!(
+        "SCORE {:07}  LIVES {}  LVL {}/8  X{}",
+        world.score.points.min(9_999_999),
+        world.lives,
+        world.level_index + 1,
+        world.score.multiplier(),
+    );
+    draw_text(
+        fb.pixmap_mut(),
+        6 * si as i32,
+        6 * si as i32,
+        &hud,
+        *TEXT,
+        si,
+    );
+    // State overlays.
+    let overlay: Option<&str> = match world.state {
+        crate::game::state::GameState::Title => Some("BREAKOUT - SPACE TO START - Q TO QUIT"),
+        crate::game::state::GameState::Paused => Some("PAUSED - ESC RESUME - Q QUIT"),
+        crate::game::state::GameState::LevelClear => Some("LEVEL CLEAR - SPACE CONTINUE - Q QUIT"),
+        crate::game::state::GameState::RunOver => Some("GAME OVER - SPACE RETRY - Q QUIT"),
+        crate::game::state::GameState::Playing => {
+            if world.balls.iter().any(|b| b.stuck) {
+                Some("SPACE TO LAUNCH")
+            } else {
+                None
+            }
+        }
+    };
+    if let Some(msg) = overlay {
+        let tw = super::text::text_width(msg, si) as f32;
+        let ox = ((fb_w - tw) / 2.0) as i32;
+        let oy = (120 * si) as i32;
+        draw_text(fb.pixmap_mut(), ox, oy, msg, *TEXT, si);
+    }
+}
+
 /// Phase 1 animated test card: scrolling gradient, bouncing AA circle,
 /// colour-bar strip, and a live FPS/frame-time overlay (PLAN Phase 1 §2, §9).
+/// Kept for headless regression + PNG preview; the game loop draws draw_world.
+#[allow(dead_code)]
 pub struct TestCard {
     t_secs: f32,
     pub scale: u32,
 }
 
+#[allow(dead_code)]
 impl TestCard {
     pub fn new(scale: u32) -> Self {
         Self { t_secs: 0.0, scale }
@@ -137,6 +256,13 @@ impl TestCard {
             s,
         );
     }
+}
+
+/// Small FPS line under the HUD (Phase 2+ overlay).
+/// Separate from the Phase 1 test-card overlay so the game HUD stays clean.
+pub fn draw_fps_line(fb: &mut Framebuffer, line: &str) {
+    let s = fb.scale();
+    draw_text(fb.pixmap_mut(), 6 * s as i32, 22 * s as i32, line, *TEXT, s);
 }
 
 /// Solid-color paint helper.

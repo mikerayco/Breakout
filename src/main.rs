@@ -9,11 +9,8 @@
 mod cli;
 mod term;
 
-// Skeleton modules from ADR-0005 §Layout, compiling with stub bodies until
-// their phases (audio: 7, save: 8).
 #[allow(dead_code)]
 mod audio;
-#[allow(dead_code)]
 mod game;
 #[allow(dead_code)]
 mod save;
@@ -22,11 +19,13 @@ mod render;
 
 use render::{compute_scale, Framebuffer};
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 
 use crate::cli::Cli;
+use crate::game::physics::World;
+use crate::game::state::GameState;
 
 const FR4_GRAPHICS_MISSING: &str = "\
 This terminal does not support the Kitty graphics protocol, which breakout requires.
@@ -40,6 +39,12 @@ fn main() -> anyhow::Result<()> {
     if cli.caps {
         print!("{}", term::caps::capability_report());
         return Ok(());
+    }
+
+    // --reset-profile arrives in Phase 8; refuse cleanly until then.
+    if cli.reset_profile {
+        eprintln!("--reset-profile arrives with the save profile in Phase 8.");
+        std::process::exit(2);
     }
 
     // FR-4: graphics support is mandatory, no text fallback.
@@ -67,80 +72,163 @@ fn install_panic_hook() {
     }));
 }
 
-/// Phase 1 render loop: animated test card at `--fps`, with resize handling
-/// and the double-buffered frame transport (PLAN Phase 1).
+/// Phase 2 game loop: fixed-timestep simulation (ADR-0006) decoupled from
+/// the presentation clock (FR-9), flat-rect rendering, resize handling
+/// (FR-10/11) and the double-buffered frame transport (ADR-0002).
 fn run_loop(cli: Cli) -> anyhow::Result<()> {
     use crossterm::event::{Event, KeyCode, KeyEventKind};
+    use game::{
+        physics::{InputState, RunModifiers, World},
+        state::GameState,
+        tuning,
+    };
     use render::Frames;
 
     let transport = term::kgp::Transport::detect();
     let mut frames = Frames::new(cli.fps, transport);
 
-    // Framebuffer at the current scale; None when the window is too small
-    // for scale 1 (FR-11).
-    let mut fb = current_framebuffer(cli.scale);
-    let mut card = render::draw::TestCard::new(fb.as_ref().map(Framebuffer::scale).unwrap_or(1));
+    let seed = cli.seed.unwrap_or(0xBEEF);
+    let mut world = World::new(
+        game::level::default_bricks(),
+        seed,
+        0,
+        RunModifiers::default(),
+    );
+    world.state = GameState::Title;
 
-    let mut last_tick = Instant::now();
+    let mut fb = current_framebuffer(cli.scale);
+
+    // Held-key decay for pre-protocol input (Phase 3 owns the real thing):
+    // a press holds its direction for 140ms so autorepeat still moves.
+    let mut left_until = Instant::now();
+    let mut right_until = Instant::now();
+    let mut launch_edge = false;
+    let hold = Duration::from_millis(140);
+
+    let mut accumulator = 0.0f32;
+    let mut last_frame = Instant::now();
 
     loop {
-        // Clean shutdown on SIGINT/SIGTERM (ADR-0010).
         if term::caps::interrupted() {
             return Ok(());
         }
-
-        // BREAKOUT_PANIC_TEST=1: prove the panic path restores the terminal
-        // (ADR-0010, re-checked every phase).
         if std::env::var("BREAKOUT_PANIC_TEST").as_deref() == Ok("1") {
             panic!("forced panic inside the render loop (BREAKOUT_PANIC_TEST)");
         }
 
-        // Input: q/Esc quits; everything else is ignored in Phase 1.
-        if crossterm::event::poll(frames.wait_until_next())? {
+        // Drain input without blocking past the next frame deadline.
+        let deadline = frames.wait_until_next();
+        let poll_start = Instant::now();
+        while crossterm::event::poll(Duration::from_secs(0))? {
             if let Event::Key(key) = crossterm::event::read()? {
-                if key.kind == KeyEventKind::Press
-                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                {
-                    return Ok(());
+                if key.kind == KeyEventKind::Release {
+                    continue; // full release handling arrives in Phase 3
+                }
+                match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Esc => match world.state {
+                        GameState::Playing => {
+                            world.state = GameState::Paused;
+                        }
+                        GameState::Paused => {
+                            world.state = GameState::Playing;
+                        }
+                        _ => return Ok(()),
+                    },
+                    KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
+                        left_until = Instant::now() + hold;
+                    }
+                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
+                        right_until = Instant::now() + hold;
+                    }
+                    KeyCode::Char(' ') => launch_edge = true,
+                    KeyCode::Enter => {
+                        if world.state != GameState::Playing {
+                            advance_state(&mut world);
+                        } else {
+                            launch_edge = true;
+                        }
+                    }
+                    _ => {}
                 }
             }
+            if poll_start.elapsed() > Duration::from_millis(4) {
+                break;
+            }
+        }
+        // Space also advances menus.
+        if launch_edge && world.state != GameState::Playing {
+            advance_state(&mut world);
+            launch_edge = false;
         }
 
-        // Present when due; if we're late the clock snaps — frames are
-        // dropped, never queued (FR-9).
         let now = Instant::now();
         if now < frames.next_due() {
+            // Not due yet: short sleep to avoid a hot spin, then re-poll.
+            std::thread::sleep(deadline.min(Duration::from_millis(2)));
             continue;
         }
         frames.record_presented(now);
 
-        card.tick((now - last_tick).as_secs_f32().min(0.25));
-        last_tick = now;
+        // Fixed-timestep accumulator (ADR-0006): consume frame time in DT
+        // steps, cap catch-up, drop the spiral remainder.
+        let elapsed = (now - last_frame).as_secs_f32().min(0.25);
+        last_frame = now;
+        if world.state == GameState::Playing {
+            accumulator += elapsed;
+            let mut steps = 0u8;
+            while accumulator >= tuning::DT && steps < tuning::MAX_CATCHUP {
+                let input = InputState {
+                    left: now < left_until,
+                    right: now < right_until,
+                    launch: launch_edge,
+                };
+                world.step(input, tuning::DT);
+                accumulator -= tuning::DT;
+                steps += 1;
+                // Edge consumed by the first step.
+                launch_edge = false;
+                if world.state != GameState::Playing {
+                    accumulator = 0.0;
+                    break;
+                }
+            }
+            if accumulator >= tuning::DT {
+                accumulator = 0.0;
+            }
+        } else {
+            accumulator = 0.0;
+            launch_edge = false;
+        }
 
-        // Resize: recompute the scale, reallocate if it changed (FR-10), and
-        // recover live from a too-small window (FR-11).
-        let wanted = current_framebuffer(cli.scale);
-        match wanted {
+        // Resize: recompute scale, reallocate if changed (FR-10), recover
+        // live from too-small (FR-11).
+        match current_framebuffer(cli.scale) {
             Some(wanted) if wanted.scale() != fb.as_ref().map(Framebuffer::scale).unwrap_or(0) => {
-                // Scale changed (or we just recovered from too-small).
-                resize_rebuild(&mut fb, wanted, &mut card, &mut frames);
+                resize_rebuild(&mut fb, wanted, &mut frames);
             }
             None => {
-                // Too small for scale 1: show the message, keep rendering.
                 if let Some(cur) = &mut fb {
                     render::draw::draw_too_small(cur);
                 }
             }
-            _ => {} // scale unchanged
+            _ => {}
         }
 
-        // Animate + overlay (only when we have a full-size framebuffer).
         if let Some(cur) = &mut fb {
-            card.draw(cur);
+            render::draw::draw_world(cur, &world);
             let (p50, p99) = frames.percentiles();
-            card.draw_overlay(cur, frames.avg_fps(), p50, p99, frames.transport.name());
-
-            // Present via transport; double-buffer image ids (ADR-0002).
+            render::draw::draw_fps_line(
+                cur,
+                &format!(
+                    "FPS {:>3.0} P50 {:>4.1} P99 {:>4.1} {} S={}",
+                    frames.avg_fps(),
+                    p50,
+                    p99,
+                    frames.transport.name(),
+                    cur.scale(),
+                ),
+            );
             let (id, prev) = frames.next_image_id();
             let w = cur.width();
             let h = cur.height();
@@ -150,9 +238,46 @@ fn run_loop(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
+/// Space/Enter on a menu state: title -> play, clear -> next level (fresh
+/// bricks for Phase 2), over -> fresh run.
+fn advance_state(world: &mut World) {
+    use game::state::StateEvent;
+    match world.state {
+        GameState::Title => {
+            world.state = world
+                .state
+                .transition(StateEvent::Start)
+                .unwrap_or(GameState::Playing);
+        }
+        GameState::LevelClear => {
+            *world = World::new(
+                game::level::default_bricks(),
+                world.rng.next_u32_below(u32::MAX) as u64,
+                world.level_index.saturating_add(1),
+                world.modifiers,
+            );
+        }
+        GameState::RunOver => {
+            *world = World::new(
+                game::level::default_bricks(),
+                world.rng.next_u32_below(u32::MAX) as u64,
+                0,
+                world.modifiers,
+            );
+            world.state = GameState::Title;
+        }
+        GameState::Paused => {
+            world.state = world
+                .state
+                .transition(StateEvent::Resume)
+                .unwrap_or(GameState::Playing);
+        }
+        GameState::Playing => {}
+    }
+}
+
 /// Build the framebuffer at the current scale, or `None` if the window is
-/// too small for scale 1 (FR-11). `--scale` overrides the auto computation
-/// for testing (ADR-0003).
+/// too small for scale 1 (FR-11).
 fn current_framebuffer(forced_scale: Option<u32>) -> Option<Framebuffer> {
     let scale = match forced_scale {
         Some(s) => s.clamp(
@@ -163,8 +288,6 @@ fn current_framebuffer(forced_scale: Option<u32>) -> Option<Framebuffer> {
             let geo = term::caps::pixel_geometry();
             match geo.window {
                 Some((w, h)) => compute_scale(w, h)?,
-                // No pixel size available (non-Ghostty terminal); fall back
-                // to scale 1 so the test card still renders somewhere.
                 None => return Some(Framebuffer::new(1).expect("scale-1 framebuffer")),
             }
         }
@@ -172,19 +295,11 @@ fn current_framebuffer(forced_scale: Option<u32>) -> Option<Framebuffer> {
     Framebuffer::new(scale)
 }
 
-/// Reallocate the framebuffer + card on a scale change (FR-10). Deletes all
-/// images; the next transmit starts with a clean id.
-fn resize_rebuild(
-    fb: &mut Option<Framebuffer>,
-    new_fb: Framebuffer,
-    card: &mut render::draw::TestCard,
-    frames: &mut render::Frames,
-) {
+/// Reallocate the framebuffer on a scale change (FR-10). Deletes all images.
+fn resize_rebuild(fb: &mut Option<Framebuffer>, new_fb: Framebuffer, frames: &mut render::Frames) {
     use std::io::Write;
-    // Delete every image placement; the next frame starts clean.
     let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=A,q=2\x1b\\");
     let _ = std::io::stdout().flush();
     *fb = Some(new_fb);
-    card.scale = fb.as_ref().map(Framebuffer::scale).unwrap_or(1);
     frames.image_id = 1;
 }
