@@ -46,9 +46,13 @@ impl Transport {
     }
 }
 
-/// Transmit one frame at the current cursor position, then delete the
-/// previous frame's image (ADR-0002 double buffering).
-/// `image_id` alternates 1/2; `prev_image_id` is the one to delete after.
+/// Transmit one frame, then delete the previous frame's image (ADR-0002
+/// double buffering). `image_id` alternates 1/2; `prev_image_id` is the
+/// one to delete after.
+///
+/// The image anchors at the cursor, so the cursor is homed first every
+/// frame — without this the frame lands wherever the shell left the
+/// cursor (usually the bottom) and the screen stays empty.
 pub fn send_frame(
     transport: Transport,
     rgb: &[u8],
@@ -57,6 +61,7 @@ pub fn send_frame(
     image_id: u32,
     prev_image_id: u32,
 ) -> Result<()> {
+    home_cursor()?;
     match transport {
         Transport::Shm => {
             // If shm fails for any reason, fall back to direct for this and
@@ -69,6 +74,15 @@ pub fn send_frame(
         Transport::Direct => emit_direct(rgb, w, h, image_id)?,
     }
     delete_image(prev_image_id)?;
+    Ok(())
+}
+
+/// Park the cursor at the top-left cell so the frame fills the window.
+fn home_cursor() -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    write!(lock, "\x1b[H")?;
+    lock.flush()?;
     Ok(())
 }
 
