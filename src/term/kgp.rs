@@ -114,38 +114,58 @@ fn emit_shm(name_b64: &str, w: u32, h: u32, image_id: u32) -> Result<()> {
     Ok(())
 }
 
-/// `t=d`: base64 the whole frame, chunk into ≤4096-byte pieces, `m=1` except
-/// the last (`m=0`). The cursor must already be parked at the image origin.
-fn emit_direct(rgb: &[u8], w: u32, h: u32, image_id: u32) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
+// Reused base64 scratch: a scale-4 frame encodes to ~5 MB, and
+// allocating that every frame at 60 fps is pure allocator churn.
+thread_local! {
+    static B64_BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
 
-    let encoded = BASE64.encode(rgb);
-    let bytes = encoded.as_bytes();
+/// Chunk plan for a base64 payload: `(offset, len, last)` pieces of at
+/// most [`CHUNK_BYTES`] bytes. Pure (tested): lengths are multiples of 4
+/// so no quantum ever splits, and reassembly is byte-exact.
+fn chunk_plan(total: usize) -> Vec<(usize, usize, bool)> {
+    let mut plan = Vec::new();
     let mut offset = 0usize;
-    let mut first = true;
     loop {
-        let end = (offset + CHUNK_BYTES).min(bytes.len());
-        let last = end >= bytes.len();
-        let m = if last { 0 } else { 1 };
-        if first {
-            write!(
-                lock,
-                "\x1b_Ga=T,f=24,s={w},v={h},t=d,i={image_id},p=1,q=2,C=1,m={m};"
-            )?;
-        } else {
-            write!(lock, "\x1b_Gm={m};")?;
-        }
-        lock.write_all(&bytes[offset..end])?;
-        write!(lock, "\x1b\\")?;
+        let end = (offset + CHUNK_BYTES).min(total);
+        let last = end >= total;
+        plan.push((offset, end - offset, last));
         if last {
             break;
         }
-        first = false;
         offset = end;
     }
-    lock.flush()?;
-    Ok(())
+    plan
+}
+
+/// `t=d`: base64 the whole frame into the reused scratch, then chunk into
+/// ≤4096-byte pieces, `m=1` except the last (`m=0`). The cursor must
+/// already be parked at the image origin.
+fn emit_direct(rgb: &[u8], w: u32, h: u32, image_id: u32) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    B64_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        BASE64.encode_string(rgb, &mut buf);
+        let mut first = true;
+        for (offset, len, last) in chunk_plan(buf.len()) {
+            let m = if last { 0 } else { 1 };
+            if first {
+                write!(
+                    lock,
+                    "\x1b_Ga=T,f=24,s={w},v={h},t=d,i={image_id},p=1,q=2,C=1,m={m};"
+                )?;
+                first = false;
+            } else {
+                write!(lock, "\x1b_Gm={m};")?;
+            }
+            lock.write_all(&buf.as_bytes()[offset..offset + len])?;
+            write!(lock, "\x1b\\")?;
+        }
+        lock.flush()?;
+        Ok(())
+    })
 }
 
 /// Delete an image by id, so no frame is left in scrollback (ADR-0002).
@@ -155,4 +175,43 @@ fn delete_image(image_id: u32) -> Result<()> {
     write!(lock, "\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")?;
     lock.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_reassemble_exactly() {
+        for total in [0usize, 4, 4092, 4096, 4100, 8192, 5_000_000] {
+            let plan = chunk_plan(total);
+            let mut at = 0usize;
+            for (i, (off, len, last)) in plan.iter().enumerate() {
+                assert_eq!(*off, at);
+                assert!(*len <= CHUNK_BYTES);
+                assert_eq!(*len % 4, 0, "split quantum at piece {i}");
+                assert_eq!(*last, i + 1 == plan.len());
+                at += len;
+            }
+            assert_eq!(at, total);
+        }
+    }
+
+    #[test]
+    fn scratch_encode_matches_fresh() {
+        // Buffer reuse must not change a single byte on the wire.
+        let rgb = vec![0xABu8; 1000];
+        let fresh = BASE64.encode(&rgb);
+        B64_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            BASE64.encode_string(&rgb, &mut buf);
+            assert_eq!(buf.as_str(), fresh.as_str());
+            // Second fill reuses without leftovers.
+            let small = vec![1u8; 10];
+            buf.clear();
+            BASE64.encode_string(&small, &mut buf);
+            assert_eq!(buf.as_str(), BASE64.encode(&small).as_str());
+        });
+    }
 }

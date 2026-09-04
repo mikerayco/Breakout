@@ -216,6 +216,8 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
     let mut muted = profile.muted || cli.no_audio;
     let mut debug = false;
     let mut bloom_on = !cli.no_bloom;
+    // Reused bloom mask: no per-frame allocation on the hot path.
+    let mut bloom_scratch = render::bloom::Scratch::new();
     // Audio builds on a worker thread; the game never waits (FR-49).
     // Mute persists to the profile in Phase 8; until then session state.
     let mut audio = audio::Audio::spawn(cli.no_audio);
@@ -613,7 +615,7 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
             render::draw::draw_shots(cur, &world.shots, ox, oy);
             render::draw::draw_powerup_hud(cur, &world.effects);
             if bloom_on {
-                render::bloom::apply(cur.pixmap_mut());
+                render::bloom::apply_to(cur.pixmap_mut(), &mut bloom_scratch);
             }
             if world.state == GameState::Paused {
                 render::draw::draw_pause_menu(cur, pause_selected, muted);

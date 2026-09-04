@@ -123,3 +123,22 @@ Fix: `CONTACT_EPS` separation after every contact, full depenetration
 before/after each ball step (kill line stays open), per-effect 40 ms
 audio throttle. Guards: `embedded_ball_is_pushed_out_and_keeps_moving`,
 `top_pocket_does_not_machine_gun_or_freeze`, `throttle_collapses_repeats`.
+
+## Perf pass + Stardew palette (2026-09-04, this Linux box, release, 1280x960)
+
+Measured with a temporary black_box bench (removed after; suite stays
+deterministic), sparse night scene:
+
+| Stage | Before | After |
+| --- | --- | --- |
+| Bloom (threshold+blur+composite) | full-frame float blur | bbox blur + integer threshold + reused mask: ~7-8 ms worst-case (scattered brights), ~2-4 ms clustered |
+| RGBA->RGB (`rgb_bytes`) | 0.8 ms warm (a 24 ms reading was cold zero-page artifact — production frames are always fully drawn first) | chunked over disjoint borrows (kept vectorized), reused buffer: 0.8 ms |
+| Base64 (direct transport) | ~5 MB alloc/frame | reused scratch buffer: same ~2.2 ms CPU, zero alloc churn |
+
+Fixes: `render/bloom.rs` (`Scratch`, bbox, integer luminance),
+`render/framebuffer.rs` (vectorized `rgb_bytes`), `term/kgp.rs`
+(`B64_BUF` scratch, pure `chunk_plan`, wire-identical).
+Direct-mode pty write (5 MB/frame) still dominates in Ghostty and is not
+measurable here — the F3 overlay on Mike's machine is the real gate.
+
+Palette: ADR-0012 Stardew pastel set replaces neon (MOCKUP §2 updated).
