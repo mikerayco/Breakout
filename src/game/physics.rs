@@ -401,7 +401,61 @@ impl World {
     }
 
     /// Move one ball with iterative swept collisions (up to 4 per step).
+    /// Push one ball fully out of any overlap (walls clamp, paddle and
+    /// bricks push along the minimum-penetration normal). Returns true
+    /// when a correction was applied. Runs before and after the swept
+    /// loop so float error can never wedge a ball inside geometry.
+    fn depenetrate_ball(&mut self, idx: usize) -> bool {
+        let r = tuning::BALL_R;
+        let mut fixed = false;
+        // Walls: clamp the centre into bounds (no event: a correction,
+        // not a bounce).
+        let x = self.balls[idx]
+            .x
+            .clamp(tuning::PLAY_X + r, tuning::PLAY_RIGHT - r);
+        // Top wall only: the bottom stays open so lost balls still fall
+        // past the kill line (clamping it would pin them in play).
+        let y = self.balls[idx].y.max(tuning::PLAY_TOP + r);
+        if (x - self.balls[idx].x).abs() > 0.0 || (y - self.balls[idx].y).abs() > 0.0 {
+            fixed = true;
+        }
+        self.balls[idx].x = x;
+        self.balls[idx].y = y;
+        // Paddle.
+        {
+            let w = self.paddle_width();
+            let px = self.paddle_x - w / 2.0;
+            if let Some((nx, ny, depth)) = circle_box_pushout(
+                self.balls[idx].x,
+                self.balls[idx].y,
+                r,
+                px,
+                tuning::PADDLE_Y,
+                w,
+                tuning::PADDLE_H,
+            ) {
+                self.balls[idx].x += nx * (depth + CONTACT_EPS);
+                self.balls[idx].y += ny * (depth + CONTACT_EPS);
+                fixed = true;
+            }
+        }
+        // Bricks.
+        for bi in 0..self.bricks.len() {
+            let (bx, by, bw, bh) = self.bricks[bi].aabb();
+            if let Some((nx, ny, depth)) =
+                circle_box_pushout(self.balls[idx].x, self.balls[idx].y, r, bx, by, bw, bh)
+            {
+                self.balls[idx].x += nx * (depth + CONTACT_EPS);
+                self.balls[idx].y += ny * (depth + CONTACT_EPS);
+                fixed = true;
+            }
+        }
+        fixed
+    }
+
     fn step_ball(&mut self, idx: usize, dt: f32) {
+        // Start separated: last step's float residue cannot wedge this one.
+        self.depenetrate_ball(idx);
         let mut remaining = dt;
         let mut iterations = 0;
         while remaining > 1e-7 && iterations < 4 {
@@ -416,10 +470,13 @@ impl World {
                     break;
                 }
                 Some(hit) => {
-                    // Advance to contact, reflect, continue with leftover time.
+                    // Advance to contact, separate along the normal,
+                    // reflect, continue with leftover time.
                     self.balls[idx].x += b.vx * remaining * hit.toi;
                     self.balls[idx].y += b.vy * remaining * hit.toi;
                     self.resolve_hit(idx, hit);
+                    self.balls[idx].x += hit.nx * CONTACT_EPS;
+                    self.balls[idx].y += hit.ny * CONTACT_EPS;
                     remaining *= 1.0 - hit.toi;
                     if remaining < 1e-7 {
                         break;
@@ -427,6 +484,8 @@ impl World {
                 }
             }
         }
+        // End separated: nothing embeds into the next step.
+        self.depenetrate_ball(idx);
         // Clamp inside the play area so a numerical edge never escapes.
         let r = tuning::BALL_R;
         self.balls[idx].x = self.balls[idx]
@@ -817,6 +876,48 @@ fn brick_center(col: u8, row: u8) -> (f32, f32) {
         tuning::GRID_ORIGIN_X + f32::from(col) * tuning::BRICK_CELL_W + tuning::BRICK_DRAW_W / 2.0,
         tuning::GRID_ORIGIN_Y + f32::from(row) * tuning::BRICK_CELL_H + tuning::BRICK_DRAW_H / 2.0,
     )
+}
+
+/// Contact separation, logical px. f32 noise at playfield magnitudes is
+/// ~2.4e-5, so this clears it invisibly. Every contact (and every overlap
+/// correction) offsets the ball by this along the contact normal: without
+/// it a ball landing exactly on a face re-triggers the overlap branch with
+/// time-of-impact 0, flip-flops its velocity without moving, and wedges
+/// (frozen ball + contact sound spam).
+pub const CONTACT_EPS: f32 = 1e-3;
+
+/// Push-out for an overlapping circle: minimum-penetration normal plus
+/// depth. None when separated. Used to un-wedge balls float error embeds.
+fn circle_box_pushout(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    bx: f32,
+    by: f32,
+    bw: f32,
+    bh: f32,
+) -> Option<(f32, f32, f32)> {
+    let min_x = bx - r;
+    let max_x = bx + bw + r;
+    let min_y = by - r;
+    let max_y = by + bh + r;
+    if cx < min_x || cx > max_x || cy < min_y || cy > max_y {
+        return None;
+    }
+    let push_left = cx - min_x;
+    let push_right = max_x - cx;
+    let push_up = cy - min_y;
+    let push_down = max_y - cy;
+    let m = push_left.min(push_right).min(push_up).min(push_down);
+    if m == push_left {
+        Some((-1.0, 0.0, push_left))
+    } else if m == push_right {
+        Some((1.0, 0.0, push_right))
+    } else if m == push_up {
+        Some((0.0, -1.0, push_up))
+    } else {
+        Some((0.0, 1.0, push_down))
+    }
 }
 
 /// Enforce the minimum vertical component (FR-15): the ball can never enter
@@ -1334,6 +1435,74 @@ mod tests {
             }
         }
         assert_eq!(w.remaining(), 0, "laser never hit");
+    }
+
+    #[test]
+    fn embedded_ball_is_pushed_out_and_keeps_moving() {
+        // Worst case: ball centre spawned inside a brick. It must separate
+        // within a few steps and never freeze in place.
+        let mut w = World::new(vec![brick_at(9, 2, 5)], 1, 0, RunModifiers::default());
+        w.balls.clear();
+        let (bx, by, _, _) = w.bricks[0].aabb();
+        w.balls.push(Ball {
+            x: bx + 8.0,
+            y: by + 3.0,
+            vx: 50.0,
+            vy: -120.0,
+            stuck: false,
+        });
+        let mut moved = false;
+        let (mut px, mut py) = (w.balls[0].x, w.balls[0].y);
+        for _ in 0..600 {
+            w.step(InputState::default(), tuning::DT);
+            let dx = (w.balls[0].x - px).abs();
+            let dy = (w.balls[0].y - py).abs();
+            if dx + dy > 1e-6 {
+                moved = true;
+            }
+            px = w.balls[0].x;
+            py = w.balls[0].y;
+            if moved && w.balls[0].y < by - 10.0 {
+                break; // escaped above the brick, moving on
+            }
+        }
+        assert!(moved, "embedded ball never moved");
+    }
+
+    #[test]
+    fn top_pocket_does_not_machine_gun_or_freeze() {
+        // Ball bouncing between the top wall and a steel row: it must keep
+        // displacing (no freeze) and must not emit a contact event nearly
+        // every step (no sound machine-gun).
+        let mut bricks = Vec::new();
+        for c in 0..18 {
+            bricks.push(Brick::steel(c, 0));
+        }
+        // A far brick keeps the level alive: steel never counts, so a
+        // steel-only grid would clear on step 0 and freeze by design.
+        bricks.push(Brick::normal(0, 5, 5));
+        let mut w = World::new(bricks, 1, 0, RunModifiers::default());
+        w.balls.clear();
+        w.balls.push(Ball {
+            x: 160.0,
+            y: tuning::PLAY_TOP + 5.0,
+            vx: 30.0,
+            vy: 120.0,
+            stuck: false,
+        });
+        let x0 = w.balls[0].x;
+        let mut events = 0usize;
+        for _ in 0..240 {
+            w.step(InputState::default(), tuning::DT);
+            events += w.events.len();
+            w.events.clear();
+            if w.balls.is_empty() {
+                break;
+            }
+        }
+        assert!(!w.balls.is_empty(), "ball should still be in play");
+        assert!((w.balls[0].x - x0).abs() > 1.0, "ball froze in the pocket");
+        assert!(events < 120, "contact spam: {events} events in 240 steps");
     }
 
     #[test]

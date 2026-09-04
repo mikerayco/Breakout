@@ -13,7 +13,10 @@ hand-authored text levels, and persistent shard unlocks.
 You need a terminal with the **Kitty graphics protocol**: **Ghostty**
 (primary), Kitty, or WezTerm — on macOS or Linux. Without it the game
 exits with status 2 and tells you so; there is no text-cell fallback.
-`tmux` is not supported.
+`tmux` is not supported — and neither is Herdr (or any multiplexer):
+multiplexers answer the capability queries but do not display the image
+protocol, so the game runs but the screen stays empty. Run it directly
+in Ghostty/Kitty/WezTerm.
 
 ## Install
 

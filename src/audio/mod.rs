@@ -81,6 +81,34 @@ impl Sound for NoOp {
     }
 }
 
+/// Per-effect rate limiter: identical sounds within the window collapse
+/// into one. A wedged ball can emit contact events every sim step (240Hz);
+/// without this that is a machine-gun buzz instead of a bounce.
+const THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(40);
+
+#[derive(Debug)]
+struct SfxThrottle {
+    last: [Option<std::time::Instant>; 10],
+}
+
+impl SfxThrottle {
+    fn new() -> Self {
+        Self { last: [None; 10] }
+    }
+
+    /// True when this effect may fire now (records the firing).
+    fn allow(&mut self, idx: usize) -> bool {
+        let now = std::time::Instant::now();
+        if let Some(t) = self.last[idx] {
+            if now - t < THROTTLE_WINDOW {
+                return false;
+            }
+        }
+        self.last[idx] = Some(now);
+        true
+    }
+}
+
 macro_rules! wav {
     ($name:literal) => {
         include_bytes!(concat!(env!("OUT_DIR"), "/audio/", $name, ".wav"))
@@ -97,6 +125,7 @@ pub struct KiraSound {
     sfx: [kira::sound::static_sound::StaticSoundData; 10],
     muted: bool,
     ducked: bool,
+    throttle: SfxThrottle,
 }
 
 impl KiraSound {
@@ -145,6 +174,7 @@ impl KiraSound {
             sfx,
             muted: false,
             ducked: false,
+            throttle: SfxThrottle::new(),
         })
     }
 
@@ -167,6 +197,9 @@ impl KiraSound {
 impl Sound for KiraSound {
     fn play(&mut self, sfx: Sfx, combo: u32) {
         if self.muted {
+            return;
+        }
+        if !self.throttle.allow(Self::effect_index(sfx)) {
             return;
         }
         let mut data = self.sfx[Self::effect_index(sfx)].clone();
@@ -343,6 +376,16 @@ pub fn probe_summary() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throttle_collapses_repeats() {
+        let mut t = SfxThrottle::new();
+        assert!(t.allow(1));
+        assert!(!t.allow(1));
+        assert!(t.allow(2));
+        std::thread::sleep(THROTTLE_WINDOW + std::time::Duration::from_millis(10));
+        assert!(t.allow(1));
+    }
 
     #[test]
     fn noop_never_fails() {

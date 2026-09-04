@@ -112,3 +112,14 @@ need a graphics terminal: pending Mike.
 - [ ] Linux/Ghostty: full run plays, same gates
 - [ ] `cargo install --path .` then `breakout` from `/tmp` on both
 - [ ] Three runs in a row, unprompted (success criterion 5)
+
+## Wedge fix (post-Phase 9)
+
+Report: ball wedging at the back of the brick formation — frozen with a
+fast bouncing loop. Cause: float error landing exactly on a face
+re-triggered the overlap branch at time-of-impact 0, flip-flopping
+velocity without moving while every phantom contact fired a sound.
+Fix: `CONTACT_EPS` separation after every contact, full depenetration
+before/after each ball step (kill line stays open), per-effect 40 ms
+audio throttle. Guards: `embedded_ball_is_pushed_out_and_keeps_moving`,
+`top_pocket_does_not_machine_gun_or_freeze`, `throttle_collapses_repeats`.
