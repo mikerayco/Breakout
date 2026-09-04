@@ -194,7 +194,10 @@ fn run_loop(cli: Cli, startup: StartupLevel) -> anyhow::Result<()> {
     use render::Frames;
     use term::input::{Action, Poller};
 
-    let transport = term::kgp::Transport::detect();
+    // Session transport: env-forced direct, else a 1x1 shm probe decides
+    // (Ghostty rejects t=s by default). Runs before takeover; the probe
+    // reads its own reply, so the event loop starts clean.
+    let transport = term::kgp::Transport::select();
     let mut frames = Frames::new(cli.fps, transport);
 
     let seed = cli.seed.unwrap_or(0xBEEF);

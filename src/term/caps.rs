@@ -183,6 +183,44 @@ fn with_raw_stdin<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Ask the terminal whether shared-memory frames (`t=s`) actually
+/// display. Ghostty's default image limits allow direct data (`t=d`) only,
+/// answering `t=s` with `UnsupportedMedium` — and our per-frame `q=2`
+/// suppresses that error, which used to mean a permanently empty screen.
+/// A 1x1 probe with responses on (`q=0`) settles it once at startup; the
+/// caller falls back to `t=d` for the session when this is false.
+pub fn probe_shm() -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    with_raw_stdin(|| {
+        use std::io::Write;
+        // 1x1 red pixel through the real shm path.
+        let seg = match super::shm::transmit(&[255, 0, 0], 1, 1, 0) {
+            Ok(seg) => seg,
+            Err(_) => return false,
+        };
+        let mut stdout = std::io::stdout();
+        let _ = write!(
+            stdout,
+            "\x1b_Ga=T,f=24,s=1,v=1,t=s,i=31,p=1,q=0;{}\x1b\\",
+            seg.name_b64
+        );
+        let _ = stdout.flush();
+        // Kitty answers `ESC _ G i=31;OK ESC \` on success, `;E...` on
+        // rejection. Anything else (including silence) means no shm.
+        let reply = read_until(b"\x1b\\", Duration::from_millis(300));
+        let ok = reply.windows(4).any(|w| w == b";OK\x1b");
+        // Delete the probe placement either way, then drop our segment
+        // reference (the terminal unlinks it after a successful read).
+        let _ = write!(stdout, "\x1b_Ga=d,d=I,i=31,q=2\x1b\\");
+        let _ = stdout.flush();
+        super::shm::unlink_b64(&seg.name_b64);
+        ok
+    })
+}
+
 /// Ask the terminal whether it implements the Kitty graphics protocol.
 pub fn probe_graphics() -> bool {
     use std::io::IsTerminal;

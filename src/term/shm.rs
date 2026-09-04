@@ -46,6 +46,21 @@ pub fn transmit(rgb: &[u8], w: u32, h: u32, slot: usize) -> Result<ShmSegment> {
     Ok(ShmSegment { name_b64 })
 }
 
+/// Best-effort unlink of a segment by its base64 name (startup probing).
+/// Failures are ignored: on success the terminal already unlinked it.
+pub fn unlink_b64(name_b64: &str) {
+    let Ok(raw) = BASE64.decode(name_b64) else {
+        return;
+    };
+    let Ok(name) = CString::new(raw) else {
+        return;
+    };
+    // SAFETY: shm_unlink on a valid NUL-terminated name; return ignored.
+    unsafe {
+        libc::shm_unlink(name.as_ptr());
+    }
+}
+
 /// SAFETY INVARIANT: `name` is a CString with no interior NUL; `shm_open` is
 /// called exactly as documented; the returned fd is valid until closed.
 fn create_segment(name: &CString) -> Result<RawFd> {

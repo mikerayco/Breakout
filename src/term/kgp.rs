@@ -30,11 +30,27 @@ pub enum Transport {
 }
 
 impl Transport {
+    /// Env-forced mode for testing (`BREAKOUT_TRANSPORT=direct`).
     pub fn detect() -> Self {
         if std::env::var("BREAKOUT_TRANSPORT").as_deref() == Ok("direct") {
             Self::Direct
         } else {
             Self::Shm
+        }
+    }
+
+    /// Session selection: env-forced direct wins; otherwise a 1x1 shm
+    /// probe decides. Ghostty's default image limits reject `t=s`, so
+    /// probing once up front (instead of failing every frame silently
+    /// under `q=2`) is what makes the game visible there.
+    pub fn select() -> Self {
+        if Self::detect() == Self::Direct {
+            return Self::Direct;
+        }
+        if super::caps::probe_shm() {
+            Self::Shm
+        } else {
+            Self::Direct
         }
     }
 
