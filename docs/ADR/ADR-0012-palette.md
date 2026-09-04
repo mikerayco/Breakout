@@ -27,28 +27,28 @@ or HUD code changes.
 
 | Name | Hex | Used for |
 | --- | --- | --- |
-| `bg-void` | `#171422` | Area outside the 320×240 screen |
-| `bg-deep` | `#242031` | Play area background |
-| `bg-hud` | `#2e2845` | HUD band |
-| `grid-line` | `#3a3354` | Faint background grid, 17×8 lattice |
-| `bezel` | `#9c7a54` | Fence-wood walls and the HUD rule |
-| `bezel-lit` | `#c9a876` | Inner highlight, wall flash |
-| `text` | `#fff8e7` | Primary HUD text (cream) |
-| `text-dim` | `#a89bc4` | Labels, inactive elements |
-| `paddle` | `#8fd6b4` | Paddle body (mint leaf) |
-| `paddle-cap` | `#d8f3dc` | Paddle top edge |
+| `bg-void` | `#100e1a` | Area outside the 320×240 screen |
+| `bg-deep` | `#221c38` | Play area background |
+| `bg-hud` | `#2f2750` | HUD band |
+| `grid-line` | `#453a6b` | Faint background grid, 17×8 lattice |
+| `bezel` | `#a8763e` | Fence-wood walls and the HUD rule |
+| `bezel-lit` | `#e0aa6e` | Inner highlight, wall flash |
+| `text` | `#fff6e0` | Primary HUD text (cream) |
+| `text-dim` | `#b8a8d8` | Labels, inactive elements |
+| `paddle` | `#2fd47e` | Paddle body (mint leaf) |
+| `paddle-cap` | `#a9f5c9` | Paddle top edge |
 | `ball` | `#fff3d6` | Ball core (cream) |
 | `ball-glow` | `#ffd166` | Ball trail and bloom tint (sunny yolk) |
-| `brick-1` | `#7fb6d9` | 1 HP (soft well-water blue) |
-| `brick-2` | `#8fd6a0` | 2 HP (spring leaf) |
-| `brick-3` | `#ffd166` | 3 HP (chicken gold) |
-| `brick-4` | `#ff9e6d` | 4 HP (peach) |
-| `brick-5` | `#ef6f8b` | 5 HP (berry) |
-| `brick-steel` | `#8d8aa8` | Indestructible (stone) |
-| `brick-explosive` | `#e5484d` | Explosive, 1px `#ffd166` core |
-| `powerup` | `#b892ff` | Capsules and trails (lilac) |
-| `combo` | `#ff7ab8` | Combo counter at ×3+ (pink) |
-| `danger` | `#ef476f` | Last life, low timers |
+| `brick-1` | `#3fa7ff` | 1 HP (soft well-water blue) |
+| `brick-2` | `#3ddc84` | 2 HP (spring leaf) |
+| `brick-3` | `#ffc93c` | 3 HP (chicken gold) |
+| `brick-4` | `#ff7a3d` | 4 HP (peach) |
+| `brick-5` | `#f43f6e` | 5 HP (berry) |
+| `brick-steel` | `#9a97b8` | Indestructible (stone) |
+| `brick-explosive` | `#f4253f` | Explosive, 1px `#ffd166` core |
+| `powerup` | `#a55cff` | Capsules and trails (lilac) |
+| `combo` | `#ff4fa3` | Combo counter at ×3+ (pink) |
+| `danger` | `#ff3050` | Last life, low timers |
 
 Luminance ordering of the roles is preserved (bright ball/trail/combo on
 dark soil), so the bloom threshold (0.72) and flash language behave as
@@ -68,3 +68,7 @@ variant would need another ADR.
 - [[project-plan/Breakout/MOCKUP|MOCKUP.md]] §2 (updated to match)
 - [[project-plan/Breakout/PRD|PRD.md]] OQ-4
 - `src/render/palette.rs`
+
+## v2 (2026-09-04)
+
+Mike: v1 read dull and pale. Saturated vivid pass, same roles.

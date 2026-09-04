@@ -44,28 +44,28 @@ Named exactly as they will appear in `render/palette.rs`.
 
 | Name | Hex | Used for |
 | --- | --- | --- |
-| `bg-void` | `#171422` | Area outside the 320 × 240 screen |
-| `bg-deep` | `#242031` | Play area background |
-| `bg-hud` | `#2e2845` | HUD band |
-| `grid-line` | `#3a3354` | Faint background grid in the play area, 17 × 8 lattice, 1 px |
-| `bezel` | `#9c7a54` | Walls and the HUD rule |
-| `bezel-lit` | `#c9a876` | 1 px inner highlight on the bezel, and wall flash on impact |
-| `text` | `#fff8e7` | Primary HUD text |
-| `text-dim` | `#a89bc4` | Labels, inactive elements |
-| `paddle` | `#8fd6b4` | Paddle body |
-| `paddle-cap` | `#d8f3dc` | Paddle top edge, 2 px |
+| `bg-void` | `#100e1a` | Area outside the 320 × 240 screen |
+| `bg-deep` | `#221c38` | Play area background |
+| `bg-hud` | `#2f2750` | HUD band |
+| `grid-line` | `#453a6b` | Faint background grid in the play area, 17 × 8 lattice, 1 px |
+| `bezel` | `#a8763e` | Walls and the HUD rule |
+| `bezel-lit` | `#e0aa6e` | 1 px inner highlight on the bezel, and wall flash on impact |
+| `text` | `#fff6e0` | Primary HUD text |
+| `text-dim` | `#b8a8d8` | Labels, inactive elements |
+| `paddle` | `#2fd47e` | Paddle body |
+| `paddle-cap` | `#a9f5c9` | Paddle top edge, 2 px |
 | `ball` | `#fff3d6` | Ball core |
 | `ball-glow` | `#ffd166` | Ball trail and bloom tint |
-| `brick-1` | `#7fb6d9` | 1 HP |
-| `brick-2` | `#8fd6a0` | 2 HP |
-| `brick-3` | `#ffd166` | 3 HP |
-| `brick-4` | `#ff9e6d` | 4 HP |
-| `brick-5` | `#ef6f8b` | 5 HP |
-| `brick-steel` | `#8d8aa8` | Indestructible |
-| `brick-explosive` | `#e5484d` | Explosive, with a 1 px `#ffd166` core pixel |
-| `powerup` | `#b892ff` | Capsules and their trails |
-| `combo` | `#ff7ab8` | Combo counter at ×3 and above |
-| `danger` | `#ef476f` | Last life, low timers |
+| `brick-1` | `#3fa7ff` | 1 HP |
+| `brick-2` | `#3ddc84` | 2 HP |
+| `brick-3` | `#ffc93c` | 3 HP |
+| `brick-4` | `#ff7a3d` | 4 HP |
+| `brick-5` | `#f43f6e` | 5 HP |
+| `brick-steel` | `#9a97b8` | Indestructible |
+| `brick-explosive` | `#f4253f` | Explosive, with a 1 px `#ffd166` core pixel |
+| `powerup` | `#a55cff` | Capsules and their trails |
+| `combo` | `#ff4fa3` | Combo counter at ×3 and above |
+| `danger` | `#ff3050` | Last life, low timers |
 
 A damaged brick **recolours to the tier below** rather than cracking: a 5 HP brick hit once is
 drawn as `brick-4`. That is the whole damage-state visual language — no crack sprites.
@@ -124,3 +124,4 @@ pixel doubling for headings on the summary and perk screens. **No second font, n
 - [[project-plan/Breakout/ADR/ADR-0003-logical-resolution|ADR-0003]]
 
 > Palette table replaced 2026-09-04 by ADR-0012 (Stardew pastel set).
+> Palette v2 2026-09-04: saturated vivid pass (dull/pale feedback).

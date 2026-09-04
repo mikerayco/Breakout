@@ -31,35 +31,35 @@ macro_rules! color {
 
 color!(
     BG_VOID,
-    0x171422,
+    0x100e1a,
     "Area outside the 320×240 logical screen."
 );
-color!(BG_DEEP, 0x242031, "Play area background.");
-color!(BG_HUD, 0x2e2845, "HUD band background.");
+color!(BG_DEEP, 0x221c38, "Play area background.");
+color!(BG_HUD, 0x2f2750, "HUD band background.");
 color!(
     GRID_LINE,
-    0x3a3354,
+    0x453a6b,
     "Faint background grid in the play area."
 );
-color!(BEZEL, 0x9c7a54, "Walls and the HUD rule.");
+color!(BEZEL, 0xa8763e, "Walls and the HUD rule.");
 color!(
     BEZEL_LIT,
-    0xc9a876,
+    0xe0aa6e,
     "Bezel inner highlight; wall flash on impact."
 );
-color!(TEXT, 0xfff8e7, "Primary HUD text.");
-color!(TEXT_DIM, 0xa89bc4, "Labels, inactive elements.");
-color!(PADDLE, 0x8fd6b4, "Paddle body.");
-color!(PADDLE_CAP, 0xd8f3dc, "Paddle top edge.");
-color!(BRICK_1, 0x7fb6d9, "1 HP brick.");
-color!(BRICK_2, 0x8fd6a0, "2 HP brick.");
-color!(BRICK_3, 0xffd166, "3 HP brick.");
-color!(BRICK_4, 0xff9e6d, "4 HP brick.");
-color!(BRICK_5, 0xef6f8b, "5 HP brick.");
-color!(BRICK_STEEL, 0x8d8aa8, "Indestructible brick.");
-color!(BRICK_EXPLOSIVE, 0xe5484d, "Explosive brick.");
-color!(POWERUP, 0xb892ff, "Powerup capsules and their trails.");
-color!(COMBO, 0xff7ab8, "Combo counter at ×3 and above.");
-color!(DANGER, 0xef476f, "Last life, low timers.");
+color!(TEXT, 0xfff6e0, "Primary HUD text.");
+color!(TEXT_DIM, 0xb8a8d8, "Labels, inactive elements.");
+color!(PADDLE, 0x2fd47e, "Paddle body.");
+color!(PADDLE_CAP, 0xa9f5c9, "Paddle top edge.");
+color!(BRICK_1, 0x3fa7ff, "1 HP brick.");
+color!(BRICK_2, 0x3ddc84, "2 HP brick.");
+color!(BRICK_3, 0xffc93c, "3 HP brick.");
+color!(BRICK_4, 0xff7a3d, "4 HP brick.");
+color!(BRICK_5, 0xf43f6e, "5 HP brick.");
+color!(BRICK_STEEL, 0x9a97b8, "Indestructible brick.");
+color!(BRICK_EXPLOSIVE, 0xf4253f, "Explosive brick.");
+color!(POWERUP, 0xa55cff, "Powerup capsules and their trails.");
+color!(COMBO, 0xff4fa3, "Combo counter at ×3 and above.");
+color!(DANGER, 0xff3050, "Last life, low timers.");
 color!(BALL, 0xfff3d6, "Ball core.");
-color!(BALL_GLOW, 0xffd166, "Ball trail and bloom tint.");
+color!(BALL_GLOW, 0xffc93c, "Ball trail and bloom tint.");
